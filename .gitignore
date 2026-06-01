@@ -1,0 +1,36 @@
+# ---- dependencies ----
+node_modules/
+
+# ---- secrets / env (NEVER commit) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+
+# ---- runtime / logs ----
+*.log
+npm-debug.log*
+logs/
+pids/
+*.pid
+
+# ---- build artifacts / firmware blobs ----
+*.bin
+build/
+dist/
+cyd_build/
+
+# ---- backups / db dumps ----
+backups/
+*.dump
+*.bson
+*.gz
+
+# ---- editor / os ----
+.DS_Store
+.vscode/
+.idea/
+*.swp

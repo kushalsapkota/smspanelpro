@@ -1,0 +1,14 @@
+[Unit]
+Description=SMPP Bridge — Telegram control hub
+After=network.target mongod.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/bridge
+ExecStart=/usr/bin/node /root/bridge/tgbot.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+{
+  "apps": [
+    { "name": "smpp-bridge", "script": "index.js", "env": { "NODE_ENV": "production" } },
+    { "name": "smpp-admin", "script": "admin/server.js", "env": { "NODE_ENV": "production" } },
+    { "name": "smpp-portal", "script": "portal/server.js", "env": { "NODE_ENV": "production" } }
+  ]
+}
