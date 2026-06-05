@@ -27,7 +27,7 @@ const METHODS=['bank','cash','crypto','usdt-trc20','other','manual'];
 const kindIc={note:'📝',call:'📞',meeting:'👥',email:'✉️',task:'✅',system:'⚙️'};
 
 const NAV=[
-  ['MAIN',[['dashboard','📊 Dashboard'],['clients','👥 Clients'],['mail','✉️ Mail'],['traffic','📡 Traffic & DLR'],['leads','🎯 Leads'],['tasks','✅ Tasks']]],
+  ['MAIN',[['dashboard','📊 Dashboard'],['clients','👥 Clients'],['mail','✉️ Mail'],['tickets','🎫 Tickets'],['traffic','📡 Traffic & DLR'],['leads','🎯 Leads'],['tasks','✅ Tasks']]],
   ['MONEY',[['payments','💶 Payments'],['crypto','₮ Crypto top-ups'],['invoices','🧾 Invoices'],['statements','📅 Statements']]],
   ['SYSTEM',[['templates','🔤 Auto-templates'],['domains','🌐 Domains'],['settings','⚙️ Settings']]],
 ];
@@ -44,7 +44,7 @@ async function boot(){
   $('#nav').querySelectorAll('.nav-item').forEach(n=>n.onclick=()=>go(n.dataset.nav));
   go('dashboard');
 }
-function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',mail:'Mail',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
+function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',mail:'Mail',tickets:'Support tickets',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
 let CUR='dashboard',CUR_ARG=null;
 async function go(k,arg){CUR=k;CUR_ARG=arg;setActive(k);const v=$('#view');v.innerHTML='<p class="muted">Loading…</p>';try{await VIEWS[k](v,arg);}catch(e){v.innerHTML=`<p class="err">${esc(e.message)}</p>`;}}
 window.__go=go;
@@ -187,6 +187,7 @@ VIEWS.client=async(v,username)=>{
           <div class="body">${esc(a.body)}</div></div>`).join('')||'<p class="muted">No activity yet.</p>'}
         </div>
       </div>
+      <div class="panel"><h3>✉️ Emails <span class="right muted" style="font-size:11px">inbox + sent</span></h3><div id="cl_emails"><p class="muted">Loading…</p></div></div>
       <div class="panel"><h3>🔁 Recent balance movements</h3>
         <div class="table-wrap"><table><thead><tr><th>When</th><th>Type</th><th>Amount</th><th>Balance</th></tr></thead><tbody>
         ${d.transactions.map(t=>`<tr><td>${fdate(t.createdAt)}</td><td><span class="badge ${t.type==='topup'?'green':t.type==='deduction'?'gray':'yellow'}">${esc(t.type)}</span></td><td>${eur3(t.amount)}</td><td>${eur3(t.balance_after)}</td></tr>`).join('')||'<tr><td colspan="4" class="muted">none</td></tr>'}
@@ -245,6 +246,13 @@ VIEWS.client=async(v,username)=>{
   $('#cd_stmt').onclick=()=>stmtModal(username);
   $('#cd_note').onclick=()=>noteModal('client',username,username,reload);
   $('#cd_email').onclick=()=>{const to=(p&&p.email)||'';if(!to)return toast('No email on this client — add one via Edit profile first',true);composeMail({to,subject:'',log_to:username});};
+  (async()=>{const box=$('#cl_emails');if(!box)return;
+    if(!(p&&p.email)){box.innerHTML='<p class="muted">No email on this client — add one via Edit profile to see their mail here.</p>';return;}
+    try{const r=await api('/clients/'+encodeURIComponent(username)+'/emails');
+      box.innerHTML=r.messages.length?`<div class="table-wrap"><table><tbody>${r.messages.map(m=>`<tr data-mf="${esc(m.folder)}" data-mu="${m.uid}" style="cursor:pointer"><td style="width:24px">${m.dir==='out'?'📤':'📥'}</td><td>${esc(m.subject)} ${m.hasAttachment?'📎':''}</td><td style="text-align:right;white-space:nowrap;color:#6b7280">${fdate(m.date)}</td></tr>`).join('')}</tbody></table></div>`:'<p class="muted">No emails with this address yet.</p>';
+      box.querySelectorAll('[data-mu]').forEach(row=>row.onclick=()=>openMsg(row.dataset.mf,row.dataset.mu));
+    }catch(e){box.innerHTML=`<p class="muted">Couldn't load mail: ${esc(e.message)}</p>`;}
+  })();
   $('#cd_edit').onclick=()=>profileModal(username,p,reload);
   v.querySelectorAll('[data-dn]').forEach(b=>b.onclick=async()=>{await api('/activities/'+b.dataset.dn,{method:'PATCH',body:{done:true}});toast('Done');reload();});
   v.querySelectorAll('[data-da]').forEach(b=>b.onclick=async()=>{if(confirm('Delete this entry?')){await api('/activities/'+b.dataset.da,{method:'DELETE'});reload();}});
@@ -745,7 +753,7 @@ VIEWS.domains=async v=>{
 // ============================ SETTINGS ============================
 VIEWS.settings=async v=>{
   const s=await api('/crm-settings');
-  const co=s.company||{},cr=s.crypto||{},rm=s.reminders||{},sm=s.smtp||{};
+  const co=s.company||{},cr=s.crypto||{},rm=s.reminders||{},sm=s.smtp||{},ma=s.mail||{};
   v.innerHTML=`<h2 class="title">Settings</h2>
   <div class="grid2">
     <div class="panel"><h3>🏢 Company (appears on invoices & receipts)</h3>
@@ -806,14 +814,32 @@ VIEWS.settings=async v=>{
     <label class="switch"><input type="checkbox" id="rm_on" ${rm.enabled!==false?'checked':''}/> Send Telegram reminders for due follow-ups (uses the System Telegram bot from the admin panel)</label>
     <label class="switch"><input type="checkbox" id="rm_ovd" ${rm.email_overdue?'checked':''}/> Also email clients automatically when a manual invoice goes overdue (needs SMTP above)</label>
   </div>
+  <div class="panel"><h3>📨 Mail — alerts, signature & templates</h3>
+    <div class="field"><label>New-mail Telegram alerts</label><select id="ml_notify">
+      <option value="clients" ${(ma.notify||'clients')==='clients'?'selected':''}>Only when a known client emails (recommended)</option>
+      <option value="all" ${ma.notify==='all'?'selected':''}>Every new email</option>
+      <option value="off" ${ma.notify==='off'?'selected':''}>Off</option>
+    </select><p class="muted" style="font-size:12px">Incoming client mail is always auto-logged to that client's timeline regardless of this setting.</p></div>
+    <div class="field"><label>Email signature (auto-appended to messages you compose)</label><textarea id="ml_sig" rows="4" placeholder="Bhairav SMS&#10;sales@bhairavsms.org&#10;+977…">${esc(ma.signature||'')}</textarea></div>
+    <div class="field"><label>Reply templates</label><div id="ml_tpls"></div><button class="sm" id="ml_addtpl" type="button">+ Add template</button></div>
+  </div>
   <button class="primary" id="st_save">Save settings</button> <span class="ok" id="st_ok"></span>`;
+  const tplRow=(t)=>{const row=h(`<div class="row tplrow" style="align-items:flex-start;gap:6px;margin-bottom:6px">
+    <input class="tpl_name" placeholder="name" value="${esc((t&&t.name)||'')}" style="flex:0 0 160px"/>
+    <textarea class="tpl_body" rows="2" placeholder="template text" style="flex:1">${esc((t&&t.body)||'')}</textarea>
+    <button class="sm danger tpl_del" type="button" style="flex:0 0 auto">✕</button></div>`);
+    row.querySelector('.tpl_del').onclick=()=>row.remove();return row;};
+  (ma.templates||[]).forEach(t=>$('#ml_tpls').appendChild(tplRow(t)));
+  $('#ml_addtpl').onclick=()=>$('#ml_tpls').appendChild(tplRow());
   $('#st_save').onclick=async()=>{
     await api('/crm-settings',{method:'POST',body:{
       company:{name:$('#co_name').value,address:$('#co_addr').value,email:$('#co_email').value,phone:$('#co_phone').value,vat:$('#co_vat').value,footer:$('#co_foot').value},
       crypto:{wallet:$('#cr_wallet').value.trim(),rate_mode:$('#cr_mode').value,fixed_rate:Number($('#cr_rate').value)||0,margin_pct:Number($('#cr_margin').value)||0,intent_ttl_min:Number($('#cr_ttl').value)||120,min_usdt:Number($('#cr_min').value)||0},
       reminders:{enabled:$('#rm_on').checked,email_overdue:$('#rm_ovd').checked},
       smtp:{host:$('#sm_host').value.trim(),port:Number($('#sm_port').value)||465,secure:$('#sm_secure').value==='1',user:$('#sm_user').value.trim(),pass:$('#sm_pass').value,from:$('#sm_from').value.trim(),from_name:$('#sm_fromname').value.trim()},
+      mail:{notify:$('#ml_notify').value,signature:$('#ml_sig').value,templates:[...document.querySelectorAll('#ml_tpls .tplrow')].map(r=>({name:r.querySelector('.tpl_name').value.trim(),body:r.querySelector('.tpl_body').value})).filter(t=>t.name&&t.body)},
     }});
+    window.__mailcfgClear&&window.__mailcfgClear();
     $('#st_ok').textContent='Saved.';toast('Settings saved');
   };
   $('#sm_test').onclick=async()=>{
@@ -904,9 +930,11 @@ async function openMsg(folder,uid){
     <div class="toolbar" style="margin:0">
       <button class="primary" id="mv_reply">↩ Reply</button>
       <button class="sm" id="mv_fwd">➡ Forward</button>
+      <button class="sm" id="mv_ticket">🎫 Create ticket</button>
       ${m.client?'':`<button class="sm" id="mv_log">➕ Log to client…</button>`}
       <button class="sm danger" id="mv_del" style="margin-left:auto">🗑 Delete</button>
     </div>`,(b,close3)=>{
+      $('#mv_ticket',b).onclick=async()=>{try{const t=await api('/mail/to-ticket',{method:'POST',body:{folder,uid:Number(uid)}});toast('Ticket '+t.number+' created');close3();openTicket(t._id);}catch(e){toast(e.message,true);}};
       if(m.html){const f=b.querySelector('iframe');f.srcdoc=m.html;}
       $('#mv_reply',b).onclick=()=>{close3();composeMail({to:m.from.address,subject:/^re:/i.test(m.subject)?m.subject:'Re: '+m.subject,inReplyTo:m.messageId,references:((m.references||'')+' '+m.messageId).trim(),log_to:m.client&&m.client.username,quote:`\n\n----- On ${fdate(m.date)}, ${mailAddr(m.from)} wrote -----\n${(m.text||'').split('\n').map(l=>'> '+l).join('\n')}`});};
       $('#mv_fwd',b).onclick=()=>{close3();composeMail({subject:/^fwd:/i.test(m.subject)?m.subject:'Fwd: '+m.subject,quote:`\n\n----- Forwarded message -----\nFrom: ${mailAddr(m.from)}\nDate: ${fdate(m.date)}\nSubject: ${m.subject}\n\n${m.text||''}`});};
@@ -916,18 +944,28 @@ async function openMsg(folder,uid){
   if(CUR==='mail')setTimeout(()=>{const row=document.querySelector(`[data-uid="${uid}"]`);if(row){row.style.fontWeight='400';const dot=row.querySelector('td span');if(dot)dot.remove();}},200);
 }
 
-function composeMail(pre){
+let MAILCFG=null;
+async function mailCfg(force){ if(force)MAILCFG=null; if(!MAILCFG){try{MAILCFG=(await api('/crm-settings')).mail||{};}catch(_){MAILCFG={};}} return MAILCFG; }
+window.__mailcfgClear=()=>{MAILCFG=null;};
+
+async function composeMail(pre){
   pre=pre||{};
+  const cfg=await mailCfg();
+  const sig=cfg.signature?`\n\n-- \n${cfg.signature}`:'';
+  const tpls=cfg.templates||[];
+  if(pre.quote==null)pre.quote=sig; else pre.quote=pre.quote+sig;   // signature after any reply/forward quote
   modal(pre.inReplyTo?'Reply':(pre.subject&&/^fwd:/i.test(pre.subject)?'Forward':'Compose email'),`
     <div class="field"><label>To</label><input id="cm_to" value="${esc(pre.to||'')}" placeholder="someone@example.com"/></div>
     <div class="field"><label>Cc (optional)</label><input id="cm_cc" value="${esc(pre.cc||'')}"/></div>
     <div class="field"><label>Subject</label><input id="cm_sub" value="${esc(pre.subject||'')}"/></div>
+    ${tpls.length?`<div class="field"><label>Insert template</label><select id="cm_tpl"><option value="">— choose a saved template —</option>${tpls.map((t,i)=>`<option value="${i}">${esc(t.name)}</option>`).join('')}</select></div>`:''}
     <div class="field"><label>Message</label><textarea id="cm_body" rows="10" style="font-family:inherit">${esc(pre.quote||'')}</textarea></div>
     <div class="field"><label>📎 Attachments (up to 15 files, ≤ 20 MB each)</label><input type="file" id="cm_files" multiple/><div id="cm_flist" class="muted" style="font-size:12px;margin-top:4px"></div></div>
     ${pre.log_to?`<label class="switch"><input type="checkbox" id="cm_log" checked/> Log to ${esc(pre.log_to)}'s timeline</label>`:''}
     <div class="toolbar" style="margin-top:8px"><button class="primary" id="cm_send">Send</button><span id="cm_err" class="err"></span></div>
   `,(b,close)=>{
     $('#cm_files',b).onchange=()=>{const fs=[...$('#cm_files',b).files];$('#cm_flist',b).innerHTML=fs.length?fs.map(f=>`📎 ${esc(f.name)} (${Math.round(f.size/1024)}KB)`).join(' · '):'';};
+    if($('#cm_tpl',b))$('#cm_tpl',b).onchange=e=>{const t=tpls[e.target.value];if(!t)return;const ta=$('#cm_body',b);ta.value=t.body+(ta.value?'\n\n'+ta.value:'');e.target.value='';ta.focus();};
     $('#cm_send',b).onclick=async()=>{
       const to=$('#cm_to',b).value.trim();if(!to){$('#cm_err',b).textContent='Recipient required';return;}
       const btn=$('#cm_send',b);btn.disabled=true;btn.textContent='Sending…';$('#cm_err',b).textContent='';
@@ -943,5 +981,78 @@ function composeMail(pre){
   });
 }
 window.__compose=composeMail;
+
+// ============================ SUPPORT TICKETS ============================
+const TK={status:'open'};
+const tkStatusBadge=s=>({open:'green',pending:'yellow',closed:'gray'})[s]||'gray';
+const tkPrioBadge=p=>({high:'red',normal:'blue',low:'gray'})[p]||'gray';
+
+VIEWS.tickets=async v=>{
+  const r=await api('/tickets?status='+TK.status);
+  const c=r.counts||{};
+  const tab=(k,l)=>`<button class="sm ${TK.status===k?'primary':''}" data-st="${k}">${l}${c[k]!=null&&k!=='all'?` (${c[k]})`:''}</button>`;
+  v.innerHTML=`<h2 class="title">Support tickets 🎫</h2>
+  <div class="toolbar">
+    ${tab('open','Open')}${tab('pending','Pending')}${tab('closed','Closed')}${tab('all','All')}
+    <button class="primary" id="tk_new" style="margin-left:auto">+ New ticket</button>
+  </div>
+  <div class="panel" style="padding:0">${r.tickets.length?`<div class="table-wrap"><table><thead><tr><th>#</th><th>Subject</th><th>Client / contact</th><th>Status</th><th>Priority</th><th>Updated</th></tr></thead><tbody>
+    ${r.tickets.map(t=>`<tr data-t="${t._id}" style="cursor:pointer">
+      <td class="mono">${esc(t.number)}</td>
+      <td>${esc(t.subject)} <span class="muted" style="font-size:11px">· ${t.msgCount} msg</span></td>
+      <td>${t.client_username?`<a onclick="event.stopPropagation();window.__go('client','${esc(t.client_username)}')">👤 ${esc(t.client_username)}</a>`:esc(t.contact_email||'—')}</td>
+      <td><span class="badge ${tkStatusBadge(t.status)}">${t.status}</span></td>
+      <td><span class="badge ${tkPrioBadge(t.priority)}">${t.priority}</span></td>
+      <td style="white-space:nowrap;color:#6b7280">${fdate(t.last_at)}</td></tr>`).join('')}
+  </tbody></table></div>`:'<p class="muted" style="padding:16px">No tickets in this view.</p>'}</div>`;
+  v.querySelectorAll('[data-st]').forEach(b=>b.onclick=()=>{TK.status=b.dataset.st;go('tickets');});
+  v.querySelectorAll('[data-t]').forEach(row=>row.onclick=()=>openTicket(row.dataset.t));
+  $('#tk_new').onclick=()=>newTicketModal();
+};
+
+function newTicketModal(){
+  modal('New ticket',`
+    <div class="field"><label>Subject</label><input id="nt_sub"/></div>
+    <div class="row"><div class="field"><label>Contact email</label><input id="nt_em" placeholder="client@example.com"/></div>
+    <div class="field"><label>Priority</label><select id="nt_pr"><option>normal</option><option>high</option><option>low</option></select></div></div>
+    <div class="field"><label>Opening note (optional, internal)</label><textarea id="nt_body" rows="4"></textarea></div>
+    <div class="toolbar" style="margin-top:8px"><button class="primary" id="nt_go">Create</button><span class="err" id="nt_err"></span></div>
+  `,(b,close)=>{$('#nt_go',b).onclick=async()=>{try{const t=await api('/tickets',{method:'POST',body:{subject:$('#nt_sub',b).value,contact_email:$('#nt_em',b).value,priority:$('#nt_pr',b).value,body:$('#nt_body',b).value}});close();toast('Ticket '+t.number+' created');openTicket(t._id);}catch(e){$('#nt_err',b).textContent=e.message;}};});
+}
+
+async function openTicket(id){
+  let t;try{t=await api('/tickets/'+id);}catch(e){return toast(e.message,true);}
+  const bubble=m=>{const side=m.dir==='out'?'right':'left';const bg=m.dir==='out'?'#1e3a5f':(m.dir==='note'?'#3a3320':'#262b36');
+    return `<div style="text-align:${side==='right'?'right':'left'};margin:6px 0"><div style="display:inline-block;max-width:80%;text-align:left;background:${bg};padding:8px 11px;border-radius:10px">
+      <div class="muted" style="font-size:11px;margin-bottom:3px">${m.dir==='in'?'📥 '+esc(m.from||''):m.dir==='out'?'📤 '+esc(m.by||'you'):'📝 note · '+esc(m.by||'')} · ${fdate(m.at)}</div>
+      <div style="white-space:pre-wrap">${esc(m.body||'')}</div></div></div>`;};
+  modal(t.number+' · '+t.subject,`
+    <div class="toolbar" style="margin:0 0 8px">
+      <span class="badge ${tkStatusBadge(t.status)}">${t.status}</span>
+      <span class="badge ${tkPrioBadge(t.priority)}">${t.priority}</span>
+      ${t.client_username?`<a class="badge green" onclick="window.__go('client','${esc(t.client_username)}')">👤 ${esc(t.client_username)}</a>`:''}
+      ${t.contact_email?`<span class="muted">${esc(t.contact_email)}</span>`:''}
+      <span style="margin-left:auto"></span>
+      <select id="tk_status"><option ${t.status==='open'?'selected':''}>open</option><option ${t.status==='pending'?'selected':''}>pending</option><option ${t.status==='closed'?'selected':''}>closed</option></select>
+      <select id="tk_prio"><option ${t.priority==='low'?'selected':''}>low</option><option ${t.priority==='normal'?'selected':''}>normal</option><option ${t.priority==='high'?'selected':''}>high</option></select>
+    </div>
+    <div id="tk_thread" style="max-height:38vh;overflow:auto;padding:4px;background:var(--bg,#0e1117);border-radius:8px">${(t.messages||[]).map(bubble).join('')||'<p class="muted">No messages.</p>'}</div>
+    <div class="field" style="margin-top:8px"><textarea id="tk_body" rows="4" placeholder="Type a reply (emailed to the contact) or an internal note…"></textarea></div>
+    <div class="toolbar" style="margin:0">
+      ${t.contact_email?`<button class="primary" id="tk_reply">↩ Reply by email</button><button class="sm" id="tk_replyclose">Reply & close</button>`:'<span class="muted">No contact email — notes only</span>'}
+      <button class="sm" id="tk_note">📝 Add internal note</button>
+      <span class="err" id="tk_err" style="margin-left:auto"></span>
+    </div>
+  `,(b,close)=>{
+    const reload=()=>{close();openTicket(id);};
+    $('#tk_status',b).onchange=async e=>{await api('/tickets/'+id,{method:'PATCH',body:{status:e.target.value}});toast('Status → '+e.target.value);};
+    $('#tk_prio',b).onchange=async e=>{await api('/tickets/'+id,{method:'PATCH',body:{priority:e.target.value}});toast('Priority → '+e.target.value);};
+    const send=async(close_after)=>{const body=$('#tk_body',b).value;if(!body.trim()){$('#tk_err',b).textContent='Write something first';return;}try{await api('/tickets/'+id+'/reply',{method:'POST',body:{body,close:close_after}});toast('Reply sent');reload();}catch(e){$('#tk_err',b).textContent=e.message;}};
+    if($('#tk_reply',b))$('#tk_reply',b).onclick=()=>send(false);
+    if($('#tk_replyclose',b))$('#tk_replyclose',b).onclick=()=>send(true);
+    $('#tk_note',b).onclick=async()=>{const body=$('#tk_body',b).value;if(!body.trim()){$('#tk_err',b).textContent='Write something first';return;}try{await api('/tickets/'+id+'/note',{method:'POST',body:{body}});toast('Note added');reload();}catch(e){$('#tk_err',b).textContent=e.message;}};
+  });
+}
+window.__ticket=openTicket;
 
 boot();

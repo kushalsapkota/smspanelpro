@@ -86,11 +86,35 @@ const CryptoIntentSchema = new Schema({
   by: { type: String, default: 'admin' },
 }, { timestamps: true });
 
+// Support tickets — a conversation thread with a client/contact, often spawned from an email.
+const TicketSchema = new Schema({
+  number: { type: String, required: true, unique: true },   // T-0001
+  subject: { type: String, default: '(no subject)' },
+  client_username: { type: String, default: '', index: true }, // linked CRM client, if any
+  contact_email: { type: String, default: '', index: true },   // who we're talking to
+  contact_name: { type: String, default: '' },
+  status: { type: String, enum: ['open', 'pending', 'closed'], default: 'open', index: true },
+  priority: { type: String, enum: ['low', 'normal', 'high'], default: 'normal' },
+  source: { type: String, enum: ['email', 'manual'], default: 'manual' },
+  assignee: { type: String, default: '' },
+  messages: [new Schema({
+    dir: { type: String, enum: ['in', 'out', 'note'], default: 'note' },
+    from: { type: String, default: '' },
+    body: { type: String, default: '' },
+    at: { type: Date, default: Date.now },
+    by: { type: String, default: '' },
+  }, { _id: true })],
+  last_message_id: { type: String, default: '' },           // for email reply threading (In-Reply-To)
+  references: { type: String, default: '' },
+  last_at: { type: Date, default: Date.now, index: true },
+}, { timestamps: true });
+
 const defs = {
   CrmProfile: CrmProfileSchema,
   CrmActivity: CrmActivitySchema,
   CrmLead: CrmLeadSchema,
   CryptoIntent: CryptoIntentSchema,
+  Ticket: TicketSchema,
 };
 
 const models = {};

@@ -871,6 +871,117 @@ app.post('/api/mail/send', mailUpload.array('files', 15), wrap(async (req, res) 
   res.json({ ok: true });
 }));
 
+// All email to/from a client (their profile email), across Inbox + Sent — for the client page.
+app.get('/api/clients/:username/emails', wrap(async (req, res) => {
+  const prof = await profileFor(lc(req.params.username));
+  if (!prof || !prof.email) return res.json({ email: null, messages: [] });
+  if (!(await mailer.isConfigured())) return res.status(400).json({ error: 'Email not configured' });
+  const email = prof.email.toLowerCase();
+  const [inbox, sent] = await Promise.all([
+    imap.byAddress(email, 'INBOX', 30).catch(() => []),
+    imap.byAddress(email, 'INBOX.Sent', 30).catch(() => []),
+  ]);
+  const tag = (arr, dir) => arr.map((m) => ({ ...m, dir }));
+  const messages = [...tag(inbox, 'in'), ...tag(sent, 'out')]
+    .sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 40);
+  res.json({ email: prof.email, messages });
+}));
+
+// ---------------- support tickets ----------------
+async function nextTicketNumber() {
+  const n = await M.Ticket.countDocuments();
+  return 'T-' + String(n + 1).padStart(4, '0');
+}
+
+app.get('/api/tickets', wrap(async (req, res) => {
+  const q = {};
+  if (req.query.status && req.query.status !== 'all') q.status = req.query.status;
+  if (req.query.username) q.client_username = lc(req.query.username);
+  if (req.query.q) q.subject = new RegExp(String(req.query.q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  const tickets = await M.Ticket.find(q).sort({ last_at: -1 }).limit(200).lean();
+  const counts = await M.Ticket.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]);
+  res.json({ tickets: tickets.map((t) => ({ ...t, msgCount: (t.messages || []).length })), counts: counts.reduce((a, c) => (a[c._id] = c.n, a), {}) });
+}));
+
+app.get('/api/tickets/:id', wrap(async (req, res) => {
+  const t = await M.Ticket.findById(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  res.json(t);
+}));
+
+// Manual ticket.
+app.post('/api/tickets', wrap(async (req, res) => {
+  const b = req.body || {};
+  const contact_email = (b.contact_email || '').trim().toLowerCase();
+  if (!b.subject && !contact_email) return res.status(400).json({ error: 'subject or contact_email required' });
+  let client_username = lc(b.client_username || '');
+  if (!client_username && contact_email) { const link = await linkAddresses([contact_email]); if (link[contact_email]) client_username = link[contact_email].username; }
+  const t = await M.Ticket.create({
+    number: await nextTicketNumber(), subject: b.subject || '(no subject)',
+    client_username, contact_email, contact_name: b.contact_name || '',
+    priority: b.priority || 'normal', source: 'manual',
+    messages: b.body ? [{ dir: 'note', from: req.session.admin.username, body: b.body, by: req.session.admin.username }] : [],
+    last_at: new Date(),
+  });
+  res.status(201).json(t);
+}));
+
+// Create a ticket FROM an inbox email.
+app.post('/api/mail/to-ticket', wrap(async (req, res) => {
+  const b = req.body || {};
+  const m = await imap.message({ folder: b.folder || 'INBOX', uid: b.uid });
+  const from = (m.from.address || '').toLowerCase();
+  const link = await linkAddresses([from]);
+  const t = await M.Ticket.create({
+    number: await nextTicketNumber(), subject: m.subject || '(no subject)',
+    client_username: link[from] ? link[from].username : '', contact_email: from, contact_name: m.from.name || '',
+    source: 'email', status: 'open',
+    messages: [{ dir: 'in', from, body: m.text || (m.html ? '(HTML email — open in Mail to view)' : ''), at: m.date || new Date() }],
+    last_message_id: m.messageId || '', references: m.references || '', last_at: m.date || new Date(),
+  });
+  res.status(201).json(t);
+}));
+
+// Reply to a ticket — emails the contact, appends an outbound message, sets status pending.
+app.post('/api/tickets/:id/reply', wrap(async (req, res) => {
+  if (!(await mailer.isConfigured())) return res.status(400).json({ error: 'SMTP not configured — set it in Settings → Email' });
+  const t = await M.Ticket.findById(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  if (!t.contact_email) return res.status(400).json({ error: 'this ticket has no contact email to reply to' });
+  const body = String((req.body || {}).body || '');
+  if (!body.trim()) return res.status(400).json({ error: 'reply body required' });
+  const subject = /^re:/i.test(t.subject) ? t.subject : 'Re: ' + t.subject;
+  const msg = { to: t.contact_email, subject, text: body, inReplyTo: t.last_message_id || undefined, references: t.references || undefined };
+  await mailer.send(msg);
+  try { const raw = await mailer.buildRaw(msg); await imap.appendToSent(raw); } catch (e) { console.error('[crm] ticket reply append:', e.message); }
+  t.messages.push({ dir: 'out', from: req.session.admin.username, body, by: req.session.admin.username });
+  t.status = (req.body || {}).close ? 'closed' : 'pending';
+  t.last_at = new Date();
+  await t.save();
+  if (t.client_username) await M.CrmActivity.create({ ref_type: 'client', ref_id: t.client_username, ref_name: t.client_username, kind: 'email', body: `🎫 ${t.number} reply: ${subject}\n\n${body.slice(0, 400)}`, by: req.session.admin.username }).catch(() => {});
+  res.json(t);
+}));
+
+// Internal note (not emailed).
+app.post('/api/tickets/:id/note', wrap(async (req, res) => {
+  const t = await M.Ticket.findById(req.params.id);
+  if (!t) return res.status(404).json({ error: 'not found' });
+  const body = String((req.body || {}).body || '');
+  if (!body.trim()) return res.status(400).json({ error: 'note body required' });
+  t.messages.push({ dir: 'note', from: req.session.admin.username, body, by: req.session.admin.username });
+  t.last_at = new Date(); await t.save();
+  res.json(t);
+}));
+
+app.patch('/api/tickets/:id', wrap(async (req, res) => {
+  const b = req.body || {};
+  const set = {};
+  for (const k of ['status', 'priority', 'assignee', 'subject', 'client_username']) if (b[k] != null) set[k] = b[k];
+  const t = await M.Ticket.findByIdAndUpdate(req.params.id, { $set: set }, { new: true });
+  if (!t) return res.status(404).json({ error: 'not found' });
+  res.json(t);
+}));
+
 // ---------------- domains (drives the reverse proxy on :80 via its local API) ----------------
 const axios = require('axios');
 const dns = require('dns').promises;
@@ -1010,6 +1121,7 @@ app.post('/api/crm-settings', wrap(async (req, res) => {
     crypto: { ...cur.crypto, ...(b.crypto || {}) },
     reminders: { ...cur.reminders, ...(b.reminders || {}) },
     smtp,
+    mail: { ...cur.mail, ...(b.mail || {}) }, // keeps runtime poller state (last_uid) when the UI saves only signature/templates/notify
   };
   await db.Setting.findOneAndUpdate({ key: 'crm' }, { $set: { key: 'crm', value } }, { upsert: true });
   res.json(value);
@@ -1054,6 +1166,39 @@ async function reminderTick() {
   } catch (e) { console.error('[crm] reminders:', e.message); }
 }
 
+// ---------------- inbound mail poller (new-mail Telegram alert + auto-log to client) ----------------
+async function mailPollTick() {
+  try {
+    if (!(await mailer.isConfigured())) return;          // no mailbox configured yet
+    const s = await db.Setting.findOne({ key: 'crm' });
+    const value = (s && s.value) || {};
+    const mail = value.mail || {};
+    const notify = mail.notify || 'clients';             // 'clients' | 'all' | 'off'
+    const r = await imap.newMessages(mail.last_uid || 0);
+    // First run (or the mailbox was recreated → UIDVALIDITY changed): set a baseline, don't alert on the backlog.
+    if (!mail.last_uid || (mail.uidvalidity && mail.uidvalidity !== r.uidvalidity)) {
+      await db.Setting.findOneAndUpdate({ key: 'crm' }, { $set: { 'value.mail.last_uid': r.maxUid, 'value.mail.uidvalidity': r.uidvalidity } }, { upsert: true });
+      return;
+    }
+    if (!r.messages.length) return;
+    const link = await linkAddresses(r.messages.map((m) => m.from.address));
+    for (const m of r.messages.slice().reverse()) {       // oldest-first so the timeline reads naturally
+      const client = link[(m.from.address || '').toLowerCase()];
+      if (client) {
+        // Auto-log to the client's timeline.
+        await M.CrmActivity.create({
+          ref_type: 'client', ref_id: client.username, ref_name: client.username, kind: 'email',
+          body: `📨 Received from ${m.from.address}: ${m.subject}`, by: 'mail',
+        }).catch(() => {});
+        if (notify !== 'off') await telegram.systemAlert(`📨 <b>New email from client</b>\n<b>${client.username}</b> &lt;${m.from.address}&gt;\n${m.subject}`).catch(() => {});
+      } else if (notify === 'all') {
+        await telegram.systemAlert(`📧 <b>New email</b>\n${m.from.name || m.from.address}\n${m.subject}`).catch(() => {});
+      }
+    }
+    await db.Setting.findOneAndUpdate({ key: 'crm' }, { $set: { 'value.mail.last_uid': r.maxUid, 'value.mail.uidvalidity': r.uidvalidity } });
+  } catch (e) { console.error('[crm] mail poll:', e.message); }
+}
+
 // ---------------- static SPA + boot ----------------
 app.use(express.static(path.join(__dirname, 'public'), { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
 
@@ -1062,4 +1207,6 @@ db.connect().then(() => app.listen(PORT, '0.0.0.0', () => {
   crypto2.startWatcher(30000);
   setInterval(reminderTick, 60000);
   setTimeout(reminderTick, 10000);
+  setInterval(mailPollTick, 60000);   // check for new mail every 60s
+  setTimeout(mailPollTick, 15000);
 })).catch((e) => { console.error('[crm] failed to start:', e); process.exit(1); });

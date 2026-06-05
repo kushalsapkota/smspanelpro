@@ -183,6 +183,44 @@ async function appendToSent(raw) {
   });
 }
 
+// New INBOX messages with UID greater than sinceUid (for the background poller).
+// Returns { uidvalidity, maxUid, messages } — messages newest-first.
+async function newMessages(sinceUid) {
+  return withClient(async (client) => {
+    const uidvalidity = String(client.mailbox.uidValidity);
+    const since = Number(sinceUid) || 0;
+    if (!client.mailbox.exists) return { uidvalidity, maxUid: since, messages: [] };
+    const messages = [];
+    let maxUid = since;
+    for await (const m of client.fetch(`${since + 1}:*`, { uid: true, envelope: true }, { uid: true })) {
+      if (m.uid <= since) continue;                 // a UID `*` range returns the last msg even if none are newer
+      maxUid = Math.max(maxUid, m.uid);
+      messages.push({ uid: m.uid, from: addr(m.envelope.from), to: addrs(m.envelope.to), subject: m.envelope.subject || '(no subject)', date: m.envelope.date, messageId: m.envelope.messageId || '' });
+    }
+    messages.sort((a, b) => new Date(b.date) - new Date(a.date));
+    return { uidvalidity, maxUid, messages };
+  }, 'INBOX');
+}
+
+// All messages in `folder` to/from a given email address (for the client "Emails" tab).
+async function byAddress(email, folder = 'INBOX', limit = 40) {
+  return withClient(async (client) => {
+    const ids = await client.search({ or: [{ from: email }, { to: email }] }, { uid: true });
+    const top = (ids || []).sort((a, b) => b - a).slice(0, limit);
+    const messages = [];
+    if (top.length) {
+      for await (const m of client.fetch(top, { uid: true, envelope: true, flags: true, bodyStructure: true }, { uid: true })) {
+        messages.push({
+          uid: m.uid, folder, from: addr(m.envelope.from), to: addrs(m.envelope.to),
+          subject: m.envelope.subject || '(no subject)', date: m.envelope.date,
+          seen: m.flags.has('\\Seen'), hasAttachment: hasAttachment(m.bodyStructure),
+        });
+      }
+    }
+    return messages;
+  }, folder);
+}
+
 // Unread count for the INBOX (cheap, for the nav badge).
 async function unreadCount(folder = 'INBOX') {
   return withClient(async (client) => {
@@ -191,4 +229,4 @@ async function unreadCount(folder = 'INBOX') {
   }, folder);
 }
 
-module.exports = { folders, list, message, download, setFlag, moveTo, appendToSent, unreadCount, imapCfg };
+module.exports = { folders, list, message, download, setFlag, moveTo, appendToSent, unreadCount, newMessages, byAddress, imapCfg };

@@ -14,6 +14,7 @@ async function getCrmSettings() {
     crypto: v.crypto || {},
     reminders: v.reminders || { enabled: true },
     smtp: v.smtp || {},
+    mail: v.mail || {},
   };
 }
 
