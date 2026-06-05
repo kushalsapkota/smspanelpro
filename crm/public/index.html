@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>SMS CRM · Clients & Billing</title>
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<div id="login">
+  <form class="login-card" id="loginForm">
+    <div class="logo">SMS<span>CRM</span></div>
+    <p class="sub">Clients · payments · invoicing</p>
+    <div class="field"><label>Username</label><input id="lu" value="admin" autocomplete="username"/></div>
+    <div class="field"><label>Password</label><input id="lp" type="password" autocomplete="current-password"/></div>
+    <div class="err" id="lerr"></div>
+    <button class="primary" style="width:100%" type="submit">Sign in</button>
+  </form>
+</div>
+
+<div id="app">
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="logo">SMS<span>CRM</span></div>
+      <div id="nav"></div>
+    </aside>
+    <div class="main">
+      <div class="topbar">
+        <h1 id="pageTitle">Dashboard</h1>
+        <div class="right" style="display:flex;gap:10px;align-items:center">
+          <span class="pill" id="who"></span>
+          <button class="sm" id="logout">Logout</button>
+        </div>
+      </div>
+      <div class="content" id="view"></div>
+    </div>
+  </div>
+</div>
+<div id="modalRoot"></div>
+<script src="app.js"></script>
+</body>
+</html>

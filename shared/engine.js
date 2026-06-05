@@ -11,6 +11,7 @@
 const db = require('../db');
 const providers = require('../providers');
 const axios = require('axios');
+const dlrlog = require('./dlrlog'); // permanent file-based DLR/sending archive
 
 // SMPP command_status codes (so this module needn't depend on the smpp lib).
 const S = {
@@ -70,7 +71,28 @@ function mpsExceeded(user) {
   return t.count > (user.max_mps || 10);
 }
 
-// ---- content policy ----
+// ---- content policy / auto-templating ----
+// Global content policy + the shared auto-template pool, cached 30s off the hot path.
+//   Setting 'content_policy' = { force_auto_template, numeric_only, min_len, max_len }
+//   Setting 'auto_templates' = [ "…XXXXXX…", … ]  (shared library, applies to every user)
+let _cp = null, _cpAt = 0, _pool = [], _poolAt = 0;
+async function contentPolicy() {
+  if (Date.now() - _cpAt < 30000) return _cp;
+  try { const s = await db.Setting.findOne({ key: 'content_policy' }); _cp = (s && s.value) || {}; }
+  catch (_) { _cp = _cp || {}; }
+  // sensible defaults: force auto-templating on for everyone, numeric codes 4–10 digits
+  _cp = Object.assign({ force_auto_template: true, numeric_only: true, min_len: 4, max_len: 10 }, _cp);
+  _cpAt = Date.now();
+  return _cp;
+}
+async function autoTemplatePool() {
+  if (Date.now() - _poolAt < 30000) return _pool;
+  try { const s = await db.Setting.findOne({ key: 'auto_templates' }); _pool = (s && Array.isArray(s.value) ? s.value : []) || []; }
+  catch (_) { _pool = _pool || []; }
+  _poolAt = Date.now();
+  return _pool;
+}
+
 function templateToRegex(body) {
   // {{code}}, {code}, runs of X (4+), or digit runs become wildcards.
   let re = body.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -89,28 +111,38 @@ function injectCode(tpl, code) {
 }
 
 async function checkTemplate(user, text) {
-  if (user.bypass_template) return { ok: true, finalText: text, rawCode: '' };
+  const cp = await contentPolicy();
 
-  // Injection mode — client sends only a code; gateway injects into a template.
-  if (user.templates && user.templates.length) {
-    // Codes are variable length (4 / 6 / 8 digits). Grab the longest digit-run so a
-    // stray short number in the payload can't be mistaken for the OTP.
-    const runs = String(text).match(/\d{3,}/g) || [];
-    const code = runs.length ? runs.sort((a, b) => b.length - a.length)[0] : String(text).trim();
-    const i = (rrIndex.get(user.username) || 0) % user.templates.length;
-    rrIndex.set(user.username, i + 1);
-    const tpl = user.templates[i];
-    // Placeholder expands to WHATEVER length the code is: {{code}}/{code}/{{otp}}/{otp},
-    // a run of X's (XXXX / XXXXXX / XXXXXXXX), or a run of #'s — all replaced by the code.
+  // Auto-templating is active when the operator forces it globally, OR this user
+  // is individually set to injection mode (bypass_template=false). When forced,
+  // it overrides a user's passthrough — every client is auto-templated.
+  const autoActive = cp.force_auto_template || !user.bypass_template;
+
+  if (autoActive) {
+    // The client must send ONLY a numeric code (4–10 digits by default). Anything
+    // with letters / words / symbols is rejected outright — codes, not messages.
+    const raw = String(text).trim();
+    if (cp.numeric_only !== false) {
+      const min = Number(cp.min_len) || 4, max = Number(cp.max_len) || 10;
+      if (!new RegExp(`^\\d{${min},${max}}$`).test(raw)) {
+        return { ok: false, finalText: text, reason: `expects a ${min}-${max} digit number only` };
+      }
+    }
+    // Code = the numeric payload (or, if non-numeric input is allowed, the longest digit run).
+    const code = cp.numeric_only !== false ? raw : ((String(text).match(/\d{3,}/g) || [raw]).sort((a, b) => b.length - a.length)[0]);
+
+    // Prefer the client's own templates; else fall back to the shared global pool.
+    const pool = (user.templates && user.templates.length) ? user.templates : await autoTemplatePool();
+    if (!pool.length) return { ok: false, finalText: text, reason: 'no templates configured' };
+
+    // RANDOM pick — no round-robin pattern (consecutive sends use unrelated templates).
+    const tpl = pool[Math.floor(Math.random() * pool.length)];
     const finalText = injectCode(tpl, code);
     return { ok: true, finalText, rawCode: code };
   }
 
-  // Whitelist mode — must match an approved MessageTemplate (global or per-user).
-  const tpls = await db.MessageTemplate.find({ is_active: true, $or: [{ username: null }, { username: user.username }] });
-  const match = (tpls || []).some((t) => templateToRegex(t.body).test(text));
-  if (match) return { ok: true, finalText: text, rawCode: '' };
-  return { ok: false, finalText: text };
+  // Passthrough (only when force is off AND the user is set to bypass).
+  return { ok: true, finalText: text, rawCode: '' };
 }
 
 async function isBlacklisted(username, dest) {
@@ -157,19 +189,13 @@ async function accept(user, dest, text, source, channel = 'smpp') {
   if (await hasBlockedWord(user.username, text)) return reject(S.RINVDSTADR, 'blocked word');
   if (mpsExceeded(user)) return reject(S.RTHROTTLED, 'mps exceeded');
 
-  // template policy
+  // template policy — auto-templating rejects anything that isn't a bare numeric code
   const tpl = await checkTemplate(user, text);
   if (!tpl.ok) {
     const warnings = (user.template_warnings || 0) + 1;
     await db.User.findByIdAndUpdate(user._id, { $set: { template_warnings: warnings } });
-    telegram.userAlert(user, `❌ Template mismatch (warning ${warnings}). Message blocked.`);
-    if (warnings > 3) {
-      await db.deductCredit(user.username, 1, { note: 'template mismatch penalty' }).catch(() => {});
-    }
-    if (!user.templates || !user.templates.length) {
-      return user.bypass_template ? reject(S.RSUBMITFAIL, 'no templates') : reject(S.RINVMSGLEN, 'template mismatch');
-    }
-    return reject(S.RINVMSGLEN, 'template mismatch');
+    telegram.userAlert(user, `❌ Rejected: ${tpl.reason || 'template policy'} (warning ${warnings}). Send only the numeric code.`);
+    return reject(S.RINVMSGLEN, tpl.reason || 'template mismatch');
   }
   const finalText = tpl.finalText;
 
@@ -227,6 +253,7 @@ async function fireDispatch(p) {
       } });
       if (route !== p.routes[0]) telegram.systemAlert(`🔁 Failover: ${p.user.username} -> ${p.dest} via ${route.name}`);
       db.recordUsage({ user_id: p.user._id, username: p.user.username, parts: p.parts, credits: p.cost, route_name: route.name, status: 'sent' });
+      dlrlog.append({ username: p.user.username, destination: p.dest, message_id: p.messageId, parts: p.parts, credits: p.cost, route_name: route.name, status: 'sent', dlr_status: verdict, provider_status: r.providerStatus || '' });
       if (r.pending) scheduleDlrPoll(p, route, r.messageId);
       else if (verdict === 'delivered' || verdict === 'undelivered') deliverDlr(p, verdict);
       return { success: true, via: route.name, providerId: r.messageId, dlr: verdict };
@@ -236,6 +263,7 @@ async function fireDispatch(p) {
   // all routes failed -> refund, mark failed, alert
   await db.refundCredit(p.user.username, p.cost, { note: 'dispatch failed', message_id: p.messageId });
   db.recordUsage({ user_id: p.user._id, username: p.user.username, parts: p.parts, credits: 0, route_name: '', status: 'failed' });
+  dlrlog.append({ username: p.user.username, destination: p.dest, message_id: p.messageId, parts: p.parts, credits: 0, route_name: '', status: 'failed', dlr_status: 'undelivered', provider_status: 'failed' });
   await db.MessageLog.findByIdAndUpdate(p.log._id, { $set: { status: 'failed', dlr_status: 'undelivered', provider_status: 'failed', error: lastErr } });
   telegram.systemAlert(`❌ Dispatch failed ${p.user.username} -> ${p.dest}: ${lastErr}`);
   return { success: false, error: lastErr };
@@ -274,4 +302,4 @@ async function postWebhook(user, dlr) {
 
 function genId() { return (Date.now().toString() + Math.floor(Math.random() * 1000)).slice(-12); }
 
-module.exports = { accept, fireDispatch, setDlrDeliver, deliverDlr, postWebhook, S, pickRoutes };
+module.exports = { accept, fireDispatch, setDlrDeliver, deliverDlr, postWebhook, S, pickRoutes, checkTemplate, injectCode };

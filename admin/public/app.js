@@ -26,7 +26,7 @@ const NAV=[
   ['TOOLS',[['test','🧪 SMS Tester']]],
   ['POLICY',[['blacklist','🚫 Blacklist'],['words','🔤 Blocked words'],['templates','📝 Templates']]],
   ['BUSINESS',[['invoices','🧾 Invoices'],['resellers','🏢 Resellers'],['bills','📑 Reseller bills']]],
-  ['SYSTEM',[['status','🖥️ Status'],['settings','⚙️ Settings']]],
+  ['SYSTEM',[['status','🖥️ Status'],['backup','💾 Backup'],['settings','⚙️ Settings']]],
 ];
 let ROUTES_CACHE=[];
 let CONFIG={smppHost:'your-server-ip',smppPort:2775};
@@ -54,7 +54,7 @@ async function initTz(){
   sel.innerHTML=TZ_LIST.map(([tz,label])=>`<option value="${esc(tz)}" ${tz===VIEW_TZ?'selected':''}>🌐 ${esc(label)}</option>`).join('');
   sel.onchange=()=>{VIEW_TZ=sel.value;localStorage.setItem('viewtz',VIEW_TZ);go(CUR);};
 }
-function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',users:'Users',connections:'Connections',routes:'Routes',rules:'Routing rules',logs:'Logs / DLR',analytics:'Analytics',blacklist:'Blacklist',words:'Blocked words',templates:'Templates',webhooks:'Webhooks',invoices:'Invoices',resellers:'Resellers',bills:'Reseller bills',status:'System status',settings:'Settings',test:'SMS Tester',usage:'Usage by date'};$('#pageTitle').textContent=t[k]||k;}
+function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',users:'Users',connections:'Connections',routes:'Routes',rules:'Routing rules',logs:'Logs / DLR',analytics:'Analytics',blacklist:'Blacklist',words:'Blocked words',templates:'Templates',webhooks:'Webhooks',invoices:'Invoices',resellers:'Resellers',bills:'Reseller bills',status:'System status',backup:'Backup & restore',settings:'Settings',test:'SMS Tester',usage:'Usage by date'};$('#pageTitle').textContent=t[k]||k;}
 async function refreshConnPill(){try{const d=await api('/connections');$('#connPill').innerHTML=`<span class="dot ${d.length?'on':'off'}"></span><b>${d.length}</b> bound`;}catch(_){}}
 
 let CUR='dashboard';
@@ -505,6 +505,26 @@ async function invoiceDetail(id){
 VIEWS.bills=async v=>{
   const list=await api('/bills');
   v.innerHTML=`<h2 class="title">Reseller bills</h2><div class="panel"><div class="table-wrap"><table><thead><tr><th>When</th><th>Client</th><th>Credits</th><th>Rate</th><th>Total</th><th>Paid</th><th>Status</th></tr></thead><tbody>${list.map(b=>`<tr><td>${fdate(b.createdAt)}</td><td>${esc(b.client_username||'')}</td><td>${n2(b.credits)}</td><td>${b.rate}</td><td>${b.total}</td><td>${b.paid}</td><td><span class="badge ${b.status==='paid'?'green':b.status==='partial'?'yellow':'gray'}">${b.status}</span></td></tr>`).join('')||'<tr><td colspan="7" class="muted">No bills</td></tr>'}</tbody></table></div></div>`;
+};
+
+VIEWS.backup=async v=>{
+  const fmtSize=b=>{b=Number(b||0);const u=['B','KB','MB','GB'];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++;}return (b<10&&i>0?b.toFixed(1):Math.round(b))+' '+u[i];};
+  const render=list=>{v.innerHTML=`<h2 class="title">💾 Backup & restore</h2>
+    <div class="panel"><h3>Full-system backup</h3>
+      <p class="muted">Creates one downloadable <span class="mono">.tar.gz</span> containing the <b>database</b>, all <b>app code</b>, your <b>.env secrets</b>, the permanent <b>DLR archive</b>, and the <b>Caddy + systemd</b> config — plus a <span class="mono">restore.sh</span> that rebuilds the whole panel (admin, portal, CRM, database) on a fresh server.</p>
+      <button class="primary" id="bk_go">⚙️ Create backup now</button>
+      <span id="bk_status" class="muted" style="margin-left:10px"></span>
+      <p class="muted" style="font-size:12px;margin-top:10px">⚠️ The backup contains secrets (passwords, API tokens). Store the downloaded file somewhere safe. To restore: unzip on a fresh box and run <span class="mono">bash restore.sh</span> as root.</p>
+    </div>
+    <div class="panel"><h3>Backups on server <span class="right muted" style="font-size:12px">${list.length} file(s) · /root/backups</span></h3>
+      <div class="table-wrap"><table><thead><tr><th>File</th><th>Size</th><th>Created</th><th></th></tr></thead><tbody>${list.map(b=>`<tr>
+        <td class="mono">${esc(b.file)}</td><td>${fmtSize(b.size)}</td><td>${fdate(b.at)}</td>
+        <td><a class="sm" href="/api/backup/download?file=${encodeURIComponent(b.file)}"><button class="sm">⬇ Download</button></a> <button class="sm danger" data-del="${esc(b.file)}">Delete</button></td></tr>`).join('')||'<tr><td colspan="4" class="muted">No backups yet — create one above.</td></tr>'}</tbody></table></div>
+    </div>`;
+    $('#bk_go').onclick=async()=>{const btn=$('#bk_go');btn.disabled=true;$('#bk_status').textContent='⏳ Backing up (database + code + config)…';try{const r=await api('/backup',{method:'POST'});$('#bk_status').textContent='';toast('Backup created: '+r.file);go('backup');}catch(e){$('#bk_status').textContent='';toast(e.message,true);btn.disabled=false;}};
+    v.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(confirm('Delete '+b.dataset.del+'?')){await api('/backup?file='+encodeURIComponent(b.dataset.del),{method:'DELETE'});toast('Deleted');go('backup');}});
+  };
+  render(await api('/backup/list'));
 };
 
 VIEWS.status=async v=>{

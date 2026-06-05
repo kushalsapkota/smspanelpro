@@ -560,6 +560,43 @@ app.post('/api/settings/test-telegram', wrap(async (req, res) => {
   res.json({ sent: true });
 }));
 
+// ---------------- backup / disaster recovery ----------------
+const BACKUP_DIR = '/root/backups';
+const backupList = () => {
+  try {
+    return fs.readdirSync(BACKUP_DIR).filter((f) => /^sms-backup-.*\.tar\.gz$/.test(f))
+      .map((f) => { const st = fs.statSync(path.join(BACKUP_DIR, f)); return { file: f, size: st.size, at: st.mtime }; })
+      .sort((a, b) => b.at - a.at);
+  } catch (_) { return []; }
+};
+app.get('/api/backup/list', (req, res) => res.json(backupList()));
+app.post('/api/backup', wrap(async (req, res) => {
+  const out = await new Promise((resolve, reject) => {
+    exec('bash scripts/backup.sh', { cwd: path.join(__dirname, '..'), timeout: 180000, maxBuffer: 4 * 1024 * 1024 },
+      (e, stdout, stderr) => e ? reject(new Error((stderr || e.message).slice(-400))) : resolve(String(stdout).trim().split('\n').pop()));
+  });
+  const file = path.basename(out);
+  const st = fs.existsSync(out) ? fs.statSync(out) : null;
+  res.json({ ok: true, file, size: st ? st.size : 0 });
+}));
+const safeBackup = (name) => {
+  const f = path.basename(String(name || ''));
+  if (!/^sms-backup-.*\.tar\.gz$/.test(f)) return null;
+  const fp = path.join(BACKUP_DIR, f);
+  return fs.existsSync(fp) ? fp : null;
+};
+app.get('/api/backup/download', (req, res) => {
+  const fp = safeBackup(req.query.file);
+  if (!fp) return res.status(404).json({ error: 'not found' });
+  res.download(fp);
+});
+app.delete('/api/backup', wrap(async (req, res) => {
+  const fp = safeBackup(req.query.file);
+  if (!fp) return res.status(404).json({ error: 'not found' });
+  fs.unlinkSync(fp);
+  res.json({ ok: true });
+}));
+
 // no-cache so UI changes (app.js/css) always show without a hard refresh; browser still
 // revalidates via ETag and gets a fast 304 when nothing changed.
 app.use(express.static(path.join(__dirname, 'public'), { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));

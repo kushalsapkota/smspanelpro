@@ -29,8 +29,13 @@ backups/
 *.bson
 *.gz
 
+# ---- runtime / uploaded data (not source) ----
+data/
+crm/data/
+
 # ---- editor / os ----
 .DS_Store
 .vscode/
 .idea/
 *.swp
+.admin-password.txt

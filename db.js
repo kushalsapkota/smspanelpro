@@ -196,6 +196,8 @@ const DropCommandSchema = new Schema({
 // Invoices (admin -> client) with payment tracking. Visible on the client dashboard.
 const InvoiceSchema = new Schema({
   number: { type: String, unique: true, index: true },
+  // 'manual' = ad-hoc invoice with line items; 'receipt' = auto-generated for a confirmed top-up payment
+  type: { type: String, enum: ['manual', 'receipt'], default: 'manual', index: true },
   client_id: { type: Schema.Types.ObjectId, ref: 'User', index: true },
   client_username: { type: String, index: true },
   items: { type: [{ description: String, qty: Number, unit_price: Number, amount: Number }], default: [] },
@@ -212,6 +214,8 @@ const InvoiceSchema = new Schema({
   due_date: { type: Date, default: null },
   note: { type: String, default: '' },
   by: { type: String, default: 'admin' },
+  // last time an overdue reminder fired for this invoice (debounce)
+  last_overdue_alert: { type: Date, default: null },
 }, { timestamps: true });
 InvoiceSchema.index({ client_id: 1, createdAt: -1 });
 
@@ -221,7 +225,14 @@ const PaymentSchema = new Schema({
   client_id: { type: Schema.Types.ObjectId, ref: 'User', index: true },
   client_username: { type: String, index: true },
   amount: { type: Number, required: true },
-  method: { type: String, default: 'manual' }, // manual|cash|bank|crypto|stripe
+  currency: { type: String, default: 'EUR' },
+  method: { type: String, default: 'manual' }, // manual|cash|bank|crypto|usdt-trc20|other
+  status: { type: String, enum: ['pending', 'confirmed', 'failed'], default: 'confirmed', index: true },
+  // true once this payment topped up the client's balance (prevents double-credit)
+  credited: { type: Boolean, default: false },
+  credited_amount: { type: Number, default: 0 },
+  // crypto details when method is usdt-trc20: { txid, usdt_amount, rate, wallet, network }
+  crypto: { type: Object, default: {} },
   reference: { type: String, default: '' },
   note: { type: String, default: '' },
   by: { type: String, default: 'admin' },
