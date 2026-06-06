@@ -70,7 +70,7 @@ const CryptoIntentSchema = new Schema({
   rate: { type: Number, required: true },                // EUR per 1 USDT used
   wallet: { type: String, required: true },              // our TRC-20 address
   // 'topup' = balance top-up; 'invoice' = settles a specific manual invoice on arrival
-  purpose: { type: String, enum: ['topup', 'invoice'], default: 'topup', index: true },
+  purpose: { type: String, enum: ['topup', 'invoice', 'settlement'], default: 'topup', index: true },
   target_invoice_id: { type: Schema.Types.ObjectId, ref: 'Invoice', default: null },
   target_invoice_number: { type: String, default: '' },
   status: { type: String, enum: ['pending', 'paid', 'expired', 'cancelled'], default: 'pending', index: true },

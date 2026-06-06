@@ -199,10 +199,20 @@ app.get('/api/users/:id', wrap(async (req, res) => {
 }));
 
 app.patch('/api/users/:id', wrap(async (req, res) => {
-  const allowed = ['credits', 'cost_per_sms', 'rate_per_credit', 'plan_name', 'max_mps', 'route_id', 'backup_route_id', 'is_active', 'is_suspended', 'bypass_template', 'templates', 'allowed_ips', 'default_sender_id', 'webhook_url', 'webhook_secret', 'telegram_bot_token', 'telegram_chat_id', 'role', 'timezone', 'low_balance_threshold'];
+  const allowed = ['credits', 'cost_per_sms', 'rate_per_credit', 'plan_name', 'max_mps', 'route_id', 'backup_route_id', 'is_active', 'is_suspended', 'bypass_template', 'templates', 'allowed_ips', 'default_sender_id', 'webhook_url', 'webhook_secret', 'telegram_bot_token', 'telegram_chat_id', 'role', 'timezone', 'low_balance_threshold', 'billing_mode', 'credit_limit', 'pay_day'];
   const set = {};
   for (const k of allowed) if (k in (req.body || {})) set[k] = req.body[k];
   if ('allowed_ips' in set && !Array.isArray(set.allowed_ips)) set.allowed_ips = String(set.allowed_ips).split(',').map((s) => s.trim()).filter(Boolean);
+  // Balance edits must flow through the ledger (CreditTransaction), never a raw $set —
+  // otherwise the books no longer match the transaction history (nightly reconciliation).
+  if ('credits' in set) {
+    const target = db.round3(set.credits);
+    delete set.credits;
+    const u = await db.User.findById(req.params.id);
+    if (!u) return res.status(404).json({ error: 'not found' });
+    const delta = db.round3(target - db.round3(u.credits || 0));
+    if (delta !== 0) await db.addCredits(u.username, delta, { type: 'adjustment', note: `admin set balance to €${target.toFixed(3)}`, by: req.session.admin.username });
+  }
   await db.User.findByIdAndUpdate(req.params.id, { $set: set });
   res.json({ ok: true });
 }));

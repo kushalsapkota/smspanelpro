@@ -30,4 +30,22 @@ function userAlert(user, text) {
   sendVia(user.telegram_bot_token, user.telegram_chat_id, text);
 }
 
-module.exports = { systemAlert, userAlert, sendVia };
+// Send a file (Buffer) to the operator chat — e.g. postpaid settlement statement PDFs.
+async function systemDocument(filename, buffer, caption) {
+  if (!db) return;
+  try {
+    const s = await db.Setting.findOne({ key: 'telegram' });
+    const cfg = s && s.value;
+    if (!cfg || !cfg.bot_token || !cfg.chat_id) return;
+    const FormData = require('form-data');
+    const form = new FormData();
+    form.append('chat_id', String(cfg.chat_id));
+    if (caption) form.append('caption', String(caption).slice(0, 1024));
+    form.append('parse_mode', 'HTML');
+    form.append('document', buffer, { filename, contentType: 'application/pdf' });
+    await axios.post(`https://api.telegram.org/bot${cfg.bot_token}/sendDocument`, form,
+      { headers: form.getHeaders(), timeout: 20000, maxBodyLength: 50 * 1024 * 1024 });
+  } catch (_) { /* alerts must never break the caller */ }
+}
+
+module.exports = { systemAlert, userAlert, sendVia, systemDocument };

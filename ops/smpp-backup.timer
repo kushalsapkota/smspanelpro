@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly SMPP bridge backup at 03:00 Nepal time (23:15 Europe/Berlin)
+
+[Timer]
+OnCalendar=*-*-* 23:15:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

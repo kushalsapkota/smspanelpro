@@ -56,7 +56,7 @@ async function uniqueAmount(baseUsdt) {
   throw new Error('could not allocate a unique amount, try again');
 }
 
-async function createIntent({ username, eur, by, invoice }) {
+async function createIntent({ username, eur, by, invoice, expiresAt, purpose }) {
   const { crypto: cfg } = await getCrmSettings();
   if (!cfg.wallet) throw new Error('No TRC-20 wallet configured — set it in CRM Settings first');
   const user = await db.User.findOne({ username: String(username || '').toLowerCase() });
@@ -85,12 +85,13 @@ async function createIntent({ username, eur, by, invoice }) {
     const floor = new Date(Date.now() + 14 * 864e5);
     expires = invoice.due_date && new Date(invoice.due_date) > floor ? new Date(invoice.due_date) : floor;
   }
+  if (expiresAt) expires = new Date(expiresAt); // explicit override (e.g. postpaid settlement: valid until next pay day)
 
   return CryptoIntent.create({
     username: user.username, user_id: user._id,
     eur, usdt, usdt_str: usdtStr(usdt), rate,
     wallet: cfg.wallet, status: 'pending',
-    purpose: invoice ? 'invoice' : 'topup',
+    purpose: invoice ? 'invoice' : (purpose || 'topup'),
     target_invoice_id: invoice ? invoice._id : null,
     target_invoice_number: invoice ? invoice.number : '',
     expires_at: expires,
@@ -108,6 +109,19 @@ async function intentForInvoice(invoice, by) {
   if (existing && db.round3(existing.eur) === outstanding && existing.wallet === cfg.wallet) return existing;
   if (existing) { existing.status = 'cancelled'; await existing.save(); } // outstanding or wallet changed
   return createIntent({ username: invoice.client_username, eur: outstanding, by, invoice });
+}
+
+// Find-or-refresh the pending settlement intent for a postpaid client's outstanding debt.
+// Settlement intents confirm like top-ups (recordPayment → credits the balance → debt cleared).
+async function intentForSettlement(username, eur, by, expiresAt) {
+  eur = db.round3(eur);
+  if (!(eur > 0)) return null;
+  const { crypto: cfg } = await getCrmSettings();
+  if (!cfg.wallet) return null;
+  const existing = await CryptoIntent.findOne({ status: 'pending', purpose: 'settlement', username: String(username).toLowerCase() });
+  if (existing && db.round3(existing.eur) === eur && existing.wallet === cfg.wallet) return existing;
+  if (existing) { existing.status = 'cancelled'; await existing.save(); } // outstanding or wallet changed
+  return createIntent({ username, eur, by, expiresAt, purpose: 'settlement' });
 }
 
 // ---- watcher ----
@@ -277,4 +291,4 @@ function startWatcher(intervalMs = 30000) {
   console.log(`[crypto] USDT TRC-20 watcher started (every ${intervalMs / 1000}s)`);
 }
 
-module.exports = { getRate, createIntent, intentForInvoice, checkIntents, acceptTx, startWatcher, USDT_TRC20_CONTRACT };
+module.exports = { getRate, createIntent, intentForInvoice, intentForSettlement, checkIntents, acceptTx, startWatcher, USDT_TRC20_CONTRACT };

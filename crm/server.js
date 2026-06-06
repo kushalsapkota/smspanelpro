@@ -191,6 +191,18 @@ app.get('/api/postpaid', wrap(async (req, res) => {
   ]);
   const pmap = {}; paid.forEach((p) => pmap[p._id] = p);
   const bmap = {}; burn.forEach((b2) => bmap[b2._id] = b2);
+  // Debt aging: when did this account last touch ≥ €0? The first transaction after
+  // that moment is when the current debt started.
+  const debtSince = async (username) => {
+    const lastOk = await db.CreditTransaction.findOne({ username, balance_after: { $gte: -0.0005 } }).sort({ createdAt: -1 });
+    const q = { username }; if (lastOk) q.createdAt = { $gt: lastOk.createdAt };
+    const firstNeg = await db.CreditTransaction.findOne(q).sort({ createdAt: 1 });
+    return firstNeg ? firstNeg.createdAt : null;
+  };
+  const ages = {};
+  await Promise.all(users.map(async (u) => {
+    if ((u.credits || 0) < 0) ages[u.username] = await debtSince(u.username);
+  }));
   const rows = users.map((u) => ({
     username: u.username,
     balance: db.round3(u.credits),
@@ -203,6 +215,8 @@ app.get('/api/postpaid', wrap(async (req, res) => {
     last_payment: pmap[u.username] ? pmap[u.username].last : null,
     paid_total: pmap[u.username] ? db.round3(pmap[u.username].total) : 0,
     week: bmap[u.username] ? { credits: db.round3(bmap[u.username].credits), parts: bmap[u.username].parts } : { credits: 0, parts: 0 },
+    debt_since: ages[u.username] || null,
+    debt_days: ages[u.username] ? Math.floor((Date.now() - new Date(ages[u.username]).getTime()) / 864e5) : null,
   }));
   res.json({
     clients: rows,
@@ -850,6 +864,157 @@ app.get('/api/statements/:username/:period/pdf', wrap(async (req, res) => {
   pdf.statementPdf(res, data, { ...company, logoPath: logoPath() });
 }));
 
+// ---------------- postpaid settlements (pay-day statements) ----------------
+// Range statement for a postpaid client: last N days of usage + payments + amount due NOW.
+async function buildSettlement(username, days, tz) {
+  const user = await db.User.findOne({ username });
+  if (!user) throw new Error('client not found');
+  const end = new Date();
+  const start = new Date(end.getTime() - (Math.min(92, Math.max(1, days || 7))) * 864e5);
+  const [profile, payments, usage, lastBefore] = await Promise.all([
+    profileFor(username),
+    db.Payment.find({ client_username: username, status: 'confirmed', createdAt: { $gte: start, $lt: end } }).sort({ createdAt: 1 }),
+    db.UsageEvent.aggregate([
+      { $match: { username, at: { $gte: start, $lt: end } } },
+      { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$at', timezone: tz } }, parts: { $sum: '$parts' }, credits: { $sum: '$credits' }, count: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]),
+    db.CreditTransaction.findOne({ username, createdAt: { $lt: start } }).sort({ createdAt: -1 }),
+  ]);
+  const usageRows = usage.map((u) => ({ day: u._id, parts: u.parts, credits: db.round3(u.credits), count: u.count }));
+  return {
+    username, from: start, to: end, tz, profile,
+    opening: db.round3(lastBefore ? lastBefore.balance_after : 0),
+    closing: db.round3(user.credits || 0),
+    due: db.round3(Math.max(0, -(user.credits || 0))),
+    payments,
+    topupTotal: db.round3(payments.reduce((a, p) => a + p.amount, 0)),
+    usage: usageRows,
+    usageTotal: {
+      parts: usageRows.reduce((a, u) => a + u.parts, 0),
+      credits: db.round3(usageRows.reduce((a, u) => a + u.credits, 0)),
+      count: usageRows.reduce((a, u) => a + u.count, 0),
+    },
+  };
+}
+
+// USDT pay box for a settlement (find-or-refresh intent, valid until the next pay day).
+async function settlementCryptoPay(username, due, by) {
+  try {
+    const it = await crypto2.intentForSettlement(username, due, by, new Date(Date.now() + 7 * 864e5));
+    if (!it) return null;
+    return { ...(it.toObject ? it.toObject() : it), qr: await require('qrcode').toBuffer(it.wallet, { width: 256, margin: 1 }) };
+  } catch (e) { console.error('[crm] settlement intent:', e.message); return null; }
+}
+
+app.get('/api/postpaid/:username/settlement.pdf', wrap(async (req, res) => {
+  const username = lc(req.params.username);
+  const data = await buildSettlement(username, Number(req.query.days) || 7, req.query.tz || db.DEFAULT_TZ);
+  const { company } = await getCrmSettings();
+  const cryptoPay = data.due > 0 ? await settlementCryptoPay(username, data.due, req.session.admin.username) : null;
+  pdf.settlementPdf(res, data, { ...company, logoPath: logoPath() }, cryptoPay);
+}));
+
+app.post('/api/postpaid/:username/settlement/email', wrap(async (req, res) => {
+  if (!(await mailer.isConfigured())) return res.status(400).json({ error: 'SMTP not configured — set it in Settings → Email' });
+  const username = lc(req.params.username);
+  const data = await buildSettlement(username, Number((req.body || {}).days) || 7, db.DEFAULT_TZ);
+  const { company } = await getCrmSettings();
+  const to = (((req.body || {}).to) || '').trim() || (data.profile && data.profile.email);
+  if (!to) return res.status(400).json({ error: 'no email on file for this client — add one on their profile or pass an address' });
+  const cryptoPay = data.due > 0 ? await settlementCryptoPay(username, data.due, req.session.admin.username) : null;
+  const buf = await pdfBuffer((sink) => pdf.settlementPdf(sink, data, { ...company, logoPath: logoPath() }, cryptoPay));
+  await mailer.send({
+    to,
+    subject: `Settlement statement — €${data.due.toFixed(2)} due — ${company.name || 'SMS Services'}`,
+    text: `Dear ${(data.profile && data.profile.contact_name) || username},\n\nPlease find your settlement statement attached${data.due > 0 ? ` — €${data.due.toFixed(2)} is due` : ''}.\n\n${company.footer || 'Thank you for your business.'}`,
+    attachments: [{ filename: `settlement-${username}-${new Date().toISOString().slice(0, 10)}.pdf`, content: buf }],
+  });
+  res.json({ ok: true, to });
+}));
+
+// ---------------- nightly ledger reconciliation ----------------
+// Proves every account balance equals its verified anchor + the sum of CreditTransactions
+// since — i.e. the books explain the money. Anchor rolls forward after each clean check.
+async function ledgerCheckOnce() {
+  const users = await db.User.find({});
+  const issues = []; let verified = 0; let anchored = 0;
+  for (const u of users) {
+    const a = u.ledger_anchor;
+    if (!a || !a.at) {
+      // first run: baseline this account; verification starts from this snapshot
+      await db.User.updateOne({ _id: u._id }, { $set: { ledger_anchor: { balance: db.round3(u.credits || 0), at: new Date() } } });
+      anchored++; continue;
+    }
+    const check = async () => {
+      const agg = await db.CreditTransaction.aggregate([
+        { $match: { username: u.username, createdAt: { $gt: new Date(a.at) } } },
+        { $group: { _id: null, sum: { $sum: '$amount' }, n: { $sum: 1 }, lastAt: { $max: '$createdAt' } } },
+      ]);
+      const fresh = await db.User.findById(u._id);
+      const expected = db.round3((a.balance || 0) + (agg[0] ? agg[0].sum : 0));
+      const actual = db.round3((fresh && fresh.credits) || 0);
+      return { expected, actual, delta: db.round3(actual - expected), n: agg[0] ? agg[0].n : 0, lastAt: agg[0] ? agg[0].lastAt : null };
+    };
+    let r = await check();
+    if (Math.abs(r.delta) > 0.002) {
+      // a send mid-check is not drift — settle down and measure again
+      await new Promise((ok) => setTimeout(ok, 4000));
+      r = await check();
+    }
+    if (Math.abs(r.delta) > 0.002) {
+      issues.push({ username: u.username, expected: r.expected, actual: r.actual, delta: r.delta, tx_since_anchor: r.n, anchor_at: a.at });
+    } else {
+      verified++;
+      // roll the anchor forward only when the account is quiet (no tx in the last 10s) —
+      // avoids anchoring on a timestamp that an in-flight tx could share
+      if (r.lastAt && Date.now() - new Date(r.lastAt).getTime() > 10000) {
+        await db.User.updateOne({ _id: u._id }, { $set: { ledger_anchor: { balance: r.expected, at: r.lastAt } } });
+      }
+    }
+  }
+  const result = { at: new Date(), accounts: users.length, verified, anchored, issues };
+  await db.Setting.findOneAndUpdate({ key: 'ledger_status' }, { $set: { value: result } }, { upsert: true });
+  return result;
+}
+
+app.get('/api/ledger/status', wrap(async (req, res) => {
+  const [s, b] = await Promise.all([db.Setting.findOne({ key: 'ledger_status' }), db.Setting.findOne({ key: 'backup_status' })]);
+  res.json({ ledger: (s && s.value) || null, backup: (b && b.value) || null });
+}));
+app.post('/api/ledger/check', wrap(async (req, res) => {
+  res.json(await ledgerCheckOnce());
+}));
+
+async function ledgerTick() {
+  try {
+    const now = new Date();
+    const hh = Number(new Intl.DateTimeFormat('en-GB', { timeZone: db.DEFAULT_TZ, hour: '2-digit', hour12: false }).format(now));
+    if (hh < 4) return; // run after 04:00 local — quiet hours, and after the 03:00 nightly backup
+    const tzDay = new Intl.DateTimeFormat('en-CA', { timeZone: db.DEFAULT_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+    const s = await db.Setting.findOne({ key: 'crm' });
+    if (((s && s.value && s.value.ledger_last_check) || '') === tzDay) return;
+    await db.Setting.findOneAndUpdate({ key: 'crm' }, { $set: { 'value.ledger_last_check': tzDay } }, { upsert: true });
+    const r = await ledgerCheckOnce();
+    const b = await db.Setting.findOne({ key: 'backup_status' });
+    const bv = b && b.value;
+    const bline = bv
+      ? (bv.ok ? `Backup ✓ ${bv.size_h || ''}${bv.verified ? ' · restore-tested' : ''}` : `Backup ✘ ${bv.error || 'FAILED'}`)
+      : 'Backup — none recorded yet';
+    if (r.issues.length) {
+      await telegram.systemAlert(
+        `🚨 <b>LEDGER MISMATCH</b> — ${r.issues.length} account(s) don't match their transaction history:\n` +
+        r.issues.map((i) => `• <b>${i.username}</b>: balance €${i.actual.toFixed(3)} vs ledger €${i.expected.toFixed(3)} (Δ €${i.delta.toFixed(3)})`).join('\n') +
+        `\nCheck the account's balance movements before adjusting anything.\n${bline}`
+      ).catch(() => {});
+    } else {
+      await telegram.systemAlert(
+        `🛡️ <b>Nightly safety check</b>\nLedger ✓ ${r.verified} account(s) verified${r.anchored ? ` · ${r.anchored} baselined` : ''} — books match.\n${bline}`
+      ).catch(() => {});
+    }
+  } catch (e) { console.error('[crm] ledger:', e.message); }
+}
+
 // ---------------- email (SMTP) — config test + send PDFs to clients ----------------
 // Render any pdf.* function (which streams to a "res") into a Buffer for attaching.
 function pdfBuffer(renderFn) {
@@ -1260,9 +1425,11 @@ app.post('/api/crm-settings', wrap(async (req, res) => {
     smtp,
     mail: { ...cur.mail, ...(b.mail || {}) }, // keeps runtime poller state (last_uid) when the UI saves only signature/templates/notify
   };
-  // carry over runtime markers that live outside the settings form (e.g. postpaid digest debounce)
+  // carry over runtime markers that live outside the settings form (daily-job debounces)
   const raw = await db.Setting.findOne({ key: 'crm' });
-  if (raw && raw.value && raw.value.postpaid_last_digest) value.postpaid_last_digest = raw.value.postpaid_last_digest;
+  for (const k of ['postpaid_last_digest', 'ledger_last_check']) {
+    if (raw && raw.value && raw.value[k]) value[k] = raw.value[k];
+  }
   await db.Setting.findOneAndUpdate({ key: 'crm' }, { $set: { key: 'crm', value } }, { upsert: true });
   res.json(value);
 }));
@@ -1322,6 +1489,33 @@ async function reminderTick() {
           `📆 <b>Postpaid pay day — ${DAY_NAMES[wd]}</b>\n${lines.join('\n')}\n` +
           `Total due: <b>€${totalOwed.toFixed(2)}</b>\nRecord payments in CRM → Postpaid.`
         ).catch(() => {});
+
+        // Per-client settlement statement PDF: archive to disk, send to operator Telegram,
+        // and email the client (when SMTP + a profile email exist). Best-effort per client.
+        const { company } = await getCrmSettings();
+        const emailOk = await mailer.isConfigured().catch(() => false);
+        const stmtDir = path.join(__dirname, 'data', 'statements');
+        fs.mkdirSync(stmtDir, { recursive: true });
+        for (const u of dueToday) {
+          if (!(Math.max(0, -(u.credits || 0)) > 0)) continue; // nothing due — no statement
+          try {
+            const data = await buildSettlement(u.username, 7, db.DEFAULT_TZ);
+            const cryptoPay = await settlementCryptoPay(u.username, data.due, 'system');
+            const buf = await pdfBuffer((sink) => pdf.settlementPdf(sink, data, { ...company, logoPath: logoPath() }, cryptoPay));
+            const fname = `settlement-${u.username}-${tzDay}.pdf`;
+            fs.writeFileSync(path.join(stmtDir, fname), buf);
+            await telegram.systemDocument(fname, buf, `📆 <b>${u.username}</b> — settlement statement, <b>€${data.due.toFixed(2)}</b> due`).catch(() => {});
+            if (emailOk && data.profile && data.profile.email) {
+              await mailer.send({
+                to: data.profile.email,
+                subject: `Settlement statement — €${data.due.toFixed(2)} due — ${company.name || 'SMS Services'}`,
+                text: `Dear ${data.profile.contact_name || u.username},\n\nPlease find your weekly settlement statement attached — €${data.due.toFixed(2)} is due.\n\n${company.footer || 'Thank you for your business.'}`,
+                attachments: [{ filename: fname, content: buf }],
+              });
+              await M.CrmActivity.create({ ref_type: 'client', ref_id: u.username, ref_name: u.username, kind: 'email', body: `Settlement statement emailed (€${data.due.toFixed(2)} due)`, by: 'system' }).catch(() => {});
+            }
+          } catch (e) { console.error('[crm] settlement for ' + u.username + ':', e.message); }
+        }
       }
     }
   } catch (e) { console.error('[crm] reminders:', e.message); }
@@ -1370,4 +1564,6 @@ db.connect().then(() => app.listen(PORT, '0.0.0.0', () => {
   setTimeout(reminderTick, 10000);
   setInterval(mailPollTick, 60000);   // check for new mail every 60s
   setTimeout(mailPollTick, 15000);
+  setInterval(ledgerTick, 60000);     // nightly books verification (runs once per local day after 03:00)
+  setTimeout(ledgerTick, 20000);
 })).catch((e) => { console.error('[crm] failed to start:', e); process.exit(1); });

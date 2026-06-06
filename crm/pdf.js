@@ -245,4 +245,89 @@ function statementPdf(res, data, company) {
   doc.end();
 }
 
-module.exports = { invoicePdf, statementPdf };
+// ---------------------------------------------------------------------------
+// Postpaid settlement statement (pay-day): period usage + payments + AMOUNT DUE,
+// with the optional USDT pay box (exact-amount auto-confirm, like invoices).
+// data: { username, profile, from, to, opening, closing, due,
+//         usage:[{day,count,parts,credits}], usageTotal:{...}, payments:[], topupTotal }
+// ---------------------------------------------------------------------------
+function settlementPdf(res, data, company, cryptoPay = null) {
+  const doc = open(res, `settlement-${data.username}-${fdate(data.to)}.pdf`);
+  let y = header(doc, company, 'SETTLEMENT', [
+    ['From', fdate(data.from)],
+    ['To', fdate(data.to)],
+    ['Account', data.username],
+  ]);
+  y = billTo(doc, y, data.username, data.profile || {});
+
+  if (!(data.due > 0)) stamp(doc, 'SETTLED', '#15803d');
+
+  // summary band — AMOUNT DUE is the number that matters
+  doc.rect(50, y, 495, 54).fill(data.due > 0 ? '#fef2f2' : '#f0fdfa');
+  const cell = (label, val, x, hot) => {
+    doc.fillColor(MUTE).font('Helvetica-Bold').fontSize(8).text(label, x, y + 10, { width: 115, align: 'center' });
+    doc.fillColor(hot ? '#b91c1c' : INK).font('Helvetica-Bold').fontSize(12).text(val, x, y + 26, { width: 115, align: 'center' });
+  };
+  cell('OPENING BALANCE', eur3(data.opening), 55);
+  cell('SMS CHARGES', '-' + eur3(data.usageTotal.credits), 178);
+  cell('PAYMENTS', eur(data.topupTotal), 301);
+  cell('AMOUNT DUE', eur(data.due), 424, data.due > 0);
+  y += 70;
+
+  if (data.payments.length) {
+    doc.fillColor(MUTE).font('Helvetica-Bold').fontSize(9).text('PAYMENTS RECEIVED', 50, y); y += 14;
+    const pcols = [
+      { label: 'DATE', x: 56, w: 80 },
+      { label: 'METHOD', x: 140, w: 90 },
+      { label: 'REFERENCE', x: 235, w: 215 },
+      { label: 'AMOUNT', x: 460, w: 80, align: 'right' },
+    ];
+    y = tableHead(doc, y, pcols);
+    for (const p of data.payments) y = row(doc, y, pcols, [fdate(p.createdAt), p.method, p.reference || '—', eur(p.amount)]);
+    y += 8;
+  }
+
+  doc.fillColor(MUTE).font('Helvetica-Bold').fontSize(9).text('SMS USAGE BY DAY', 50, y); y += 14;
+  const ucols = [
+    { label: 'DATE', x: 56, w: 90 },
+    { label: 'MESSAGES', x: 200, w: 90, align: 'right' },
+    { label: 'SEGMENTS', x: 300, w: 90, align: 'right' },
+    { label: 'CHARGED', x: 430, w: 110, align: 'right' },
+  ];
+  y = tableHead(doc, y, ucols);
+  if (!data.usage.length) {
+    doc.fillColor(MUTE).font('Helvetica').fontSize(9).text('No sends in this period.', 56, y); y += 16;
+  }
+  for (const u of data.usage) {
+    if (y > 700) { doc.addPage(); y = 50; y = tableHead(doc, y, ucols); }
+    y = row(doc, y, ucols, [u.day, u.count, u.parts, eur3(u.credits)]);
+  }
+  y = row(doc, y + 2, ucols, ['Total', data.usageTotal.count, data.usageTotal.parts, eur3(data.usageTotal.credits)], true) + 10;
+
+  // USDT pay box (same auto-confirm mechanism as invoices)
+  if (cryptoPay && data.due > 0) {
+    if (y > 650) { doc.addPage(); y = 50; }
+    const boxH = 96;
+    const hasQr = !!cryptoPay.qr;
+    const textW = hasQr ? 370 : 470;
+    doc.roundedRect(50, y, 495, boxH, 8).fillAndStroke('#f0fdfa', '#99f6e4');
+    doc.fillColor(ACCENT).font('Helvetica-Bold').fontSize(10).text('PAY WITH USDT  (TRC-20 / TRON network)', 64, y + 12);
+    doc.fillColor(INK).font('Helvetica').fontSize(9)
+      .text('Send exactly', 64, y + 30, { continued: true })
+      .font('Helvetica-Bold').text(`  ${cryptoPay.usdt_str} USDT  `, { continued: true })
+      .font('Helvetica').text('to:');
+    doc.font('Courier-Bold').fontSize(10.5).fillColor(INK).text(cryptoPay.wallet, 64, y + 46);
+    doc.font('Helvetica').fontSize(8).fillColor(MUTE)
+      .text('Scan the QR with your wallet app (Binance / TronLink) to fill the address, then enter the exact amount above — '
+        + 'it identifies your account and confirms automatically within minutes. TRC-20 network only. Valid until '
+        + fdate(cryptoPay.expires_at) + '.', 64, y + 64, { width: textW });
+    if (hasQr) {
+      try { doc.image(cryptoPay.qr, 462, y + 11, { fit: [74, 74] }); } catch (_) {}
+    }
+  }
+
+  footerNote(doc, company);
+  doc.end();
+}
+
+module.exports = { invoicePdf, statementPdf, settlementPdf };

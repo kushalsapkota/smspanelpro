@@ -1,0 +1,10 @@
+[Unit]
+Description=SMPP bridge nightly backup (mongodump + config, restore-verified)
+After=network.target mongod.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/bridge
+ExecStart=/usr/bin/node /root/bridge/ops/backup.js
+Nice=10
+IOSchedulingClass=idle

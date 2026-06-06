@@ -57,6 +57,11 @@ const UserSchema = new Schema({
   credit_limit: { type: Number, default: null },
   pay_day: { type: Number, default: 1 },
 
+  // ledger reconciliation anchor: {balance, at} — a verified snapshot; the nightly check
+  // proves current credits == anchor.balance + sum(transactions after anchor.at), then
+  // rolls the anchor forward. Set automatically; never edit by hand.
+  ledger_anchor: { type: Object, default: null },
+
   // integrations
   webhook_url: { type: String, default: '' },
   webhook_secret: { type: String, default: '' },
@@ -407,9 +412,30 @@ async function deductRouteCredit(routeId, parts) {
   return updated ? updated.route_credits : null;
 }
 
+// Atomic invoice counter (Setting 'invoice_seq') — numbers must NEVER repeat, even
+// after an invoice is deleted (the old countDocuments() approach reused numbers).
 async function nextInvoiceNumber() {
-  const count = await models.Invoice.countDocuments({});
-  return `INV-${new Date().getUTCFullYear()}-${String(count + 1).padStart(4, '0')}`;
+  let s = await models.Setting.findOneAndUpdate(
+    { key: 'invoice_seq', 'value.n': { $gte: 1 } },
+    { $inc: { 'value.n': 1 } },
+    { new: true }
+  );
+  if (!s) {
+    // one-time seed: highest number ever issued (scan all — invoice count is small)
+    const all = await models.Invoice.find({}, { number: 1 });
+    let max = 0;
+    for (const inv of (all || [])) {
+      const m = /(\d+)\s*$/.exec(inv.number || '');
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+    await models.Setting.updateOne(
+      { key: 'invoice_seq' },
+      { $setOnInsert: { value: { n: max } } },
+      { upsert: true }
+    );
+    s = await models.Setting.findOneAndUpdate({ key: 'invoice_seq' }, { $inc: { 'value.n': 1 } }, { new: true });
+  }
+  return `INV-${new Date().getUTCFullYear()}-${String(s.value.n).padStart(4, '0')}`;
 }
 
 // Supported reporting/display timezones (Nepal + US + UTC). [iana, label].

@@ -327,19 +327,25 @@ VIEWS.postpaid=async v=>{
     <div class="card"><div class="k">Postpaid clients</div><div class="v sm">${d.totals.count}</div></div>
     <div class="card"><div class="k">How it works</div><div class="muted" style="font-size:12px;line-height:1.5">Postpaid clients send on credit — the balance goes negative. On their pay day you get a Telegram digest; record the payment here to settle.</div></div>
   </div>
-  <div class="panel"><div class="table-wrap"><table><thead><tr><th>Client</th><th>Pay day</th><th>Outstanding</th><th>Soft limit</th><th>Sent 7d</th><th>Last payment</th><th>Status</th><th></th></tr></thead><tbody>
-  ${d.clients.map(c=>`<tr>
+  <div class="panel"><div class="table-wrap"><table><thead><tr><th>Client</th><th>Pay day</th><th>Outstanding</th><th>Owing for</th><th>Soft limit</th><th>Sent 7d</th><th>Last payment</th><th>Status</th><th></th></tr></thead><tbody>
+  ${d.clients.map(c=>{
+    const age=c.debt_days;
+    const ageBadge=age==null?'—':age>=30?`<span class="badge red">${age}d</span>`:age>=14?`<span class="badge yellow" style="background:#ffedd5;color:#9a3412">${age}d</span>`:age>=7?`<span class="badge yellow">${age}d</span>`:`<span class="badge green">${age}d</span>`;
+    return `<tr>
     <td><a onclick="window.__go('client','${esc(c.username)}')"><b>${esc(c.username)}</b></a></td>
     <td>📆 ${esc(c.pay_day_name)}</td>
     <td style="color:${c.outstanding>0?'#dc2626':'inherit'}"><b>${c.outstanding>0?eur(c.outstanding):'—'}</b>${c.balance>0?`<span class="muted" style="font-size:11px"> (in credit ${eur(c.balance)})</span>`:''}</td>
+    <td>${ageBadge}</td>
     <td>${c.credit_limit!=null?eur(c.credit_limit)+(c.over_limit?' <span class="badge red">over</span>':''):'<span class="muted">none</span>'}</td>
     <td>${n2(c.week.parts)}<span class="muted" style="font-size:11px"> seg · ${eur(c.week.credits)}</span></td>
     <td>${c.last_payment?fday(c.last_payment):'never'}</td>
     <td>${c.is_suspended?'<span class="badge red">suspended</span>':'<span class="badge green">active</span>'}</td>
-    <td>${c.outstanding>0?`<button class="sm primary" data-settle="${esc(c.username)}" data-amt="${c.outstanding}">💶 Settle</button>`:''}</td>
-  </tr>`).join('')||'<tr><td colspan="8" class="muted">No postpaid clients yet — open a client → 📡 Account / route → billing mode: postpaid.</td></tr>'}
-  </tbody></table></div></div>`;
+    <td style="white-space:nowrap">${c.outstanding>0?`<button class="sm primary" data-settle="${esc(c.username)}" data-amt="${c.outstanding}">💶 Settle</button> `:''}<button class="sm" data-stmt="${esc(c.username)}">📄 Statement</button></td>
+  </tr>`;}).join('')||'<tr><td colspan="9" class="muted">No postpaid clients yet — open a client → 📡 Account / route → billing mode: postpaid.</td></tr>'}
+  </tbody></table></div></div>
+  <p class="muted" style="font-size:12px">📄 Statement = last 7 days of usage + amount due as a PDF (with the USDT auto-pay box). One is also generated automatically on each client's pay day — sent to your Telegram and emailed to the client if they have an email on file.</p>`;
   v.querySelectorAll('[data-settle]').forEach(b=>b.onclick=()=>payModal(b.dataset.settle,()=>go('postpaid'),Number(b.dataset.amt)));
+  v.querySelectorAll('[data-stmt]').forEach(b=>b.onclick=()=>dl('/api/postpaid/'+encodeURIComponent(b.dataset.stmt)+'/settlement.pdf?days=7'));
 };
 
 // ============================ ROUTE STOCK ============================
@@ -866,6 +872,11 @@ VIEWS.settings=async v=>{
       <p class="muted" style="font-size:12px">Watcher polls the free TronGrid API every 30s for confirmed transfers to this wallet. Keep the wallet in your own custody (e.g. TronLink / hardware) — the CRM only ever <b>reads</b> the chain; no keys are stored.</p>
     </div>
   </div>
+  <div class="panel"><h3>🛡️ Money safety — books & backups</h3>
+    <div id="safety_box"><p class="muted">Loading…</p></div>
+    <div class="actions" style="justify-content:flex-start"><button class="sm" id="ledger_now">🔍 Verify books now</button></div>
+    <p class="muted" style="font-size:12px">Every night: the ledger check re-computes each account's balance from its full transaction history (any mismatch = 🚨 Telegram alert), and a restore-tested MongoDB + config backup is taken at 03:00 (kept 14 days in /root/backups). You get one 🛡️ summary on Telegram daily.</p>
+  </div>
   <div class="panel"><h3>📧 Email (SMTP) — send invoices, receipts & statements</h3>
     <div class="row">
       <div class="field" style="flex:2"><label>SMTP host</label><input id="sm_host" value="${esc(sm.host||'')}" placeholder="smtp.hostinger.com"/></div>
@@ -934,6 +945,20 @@ VIEWS.settings=async v=>{
     toast('Logo uploaded');go('settings');
   };
   if($('#logo_rm'))$('#logo_rm').onclick=async()=>{if(confirm('Remove the logo?')){await api('/crm-settings/logo',{method:'DELETE'});toast('Removed');go('settings');}};
+  const renderSafety=d=>{const L=d.ledger,B=d.backup;
+    const lg=L?(L.issues&&L.issues.length
+      ?`<span class="badge red">🚨 ${L.issues.length} mismatch</span> ${L.issues.map(i=>`<b>${esc(i.username)}</b> Δ€${Number(i.delta).toFixed(3)}`).join(', ')}`
+      :`<span class="badge green">✓ books match</span> ${L.verified} account(s) verified${L.anchored?`, ${L.anchored} baselined`:''} · ${fdate(L.at)}`)
+      :'<span class="badge gray">not run yet</span> first check runs tonight';
+    const bk=B?(B.ok
+      ?`<span class="badge green">✓ ${esc(B.size_h||'')}</span>${B.verified?' restore-tested':''} · ${fdate(B.at)}`
+      :`<span class="badge red">✘ failed</span> ${esc(B.error||'')} · ${fdate(B.at)}`)
+      :'<span class="badge gray">none yet</span> first backup tonight 03:00';
+    $('#safety_box').innerHTML=`<div class="kv"><span>Ledger (books vs transactions)</span><span>${lg}</span></div><div class="kv"><span>Last backup</span><span>${bk}</span></div>`;};
+  api('/ledger/status').then(renderSafety).catch(()=>{$('#safety_box').innerHTML='<p class="muted">Couldn\'t load status.</p>';});
+  $('#ledger_now').onclick=async()=>{const b=$('#ledger_now');b.disabled=true;b.textContent='Checking…';
+    try{const r=await api('/ledger/check',{method:'POST'});toast(r.issues.length?`🚨 ${r.issues.length} mismatch(es)!`:`✓ ${r.verified} account(s) verified`,r.issues.length>0);renderSafety({ledger:r,backup:null});api('/ledger/status').then(renderSafety).catch(()=>{});}
+    catch(e){toast(e.message,true);}b.disabled=false;b.textContent='🔍 Verify books now';};
 };
 
 // ============================ MAIL (IMAP worksuite) ============================
