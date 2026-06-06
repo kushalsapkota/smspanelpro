@@ -28,8 +28,8 @@ const kindIc={note:'📝',call:'📞',meeting:'👥',email:'✉️',task:'✅',s
 
 const NAV=[
   ['MAIN',[['dashboard','📊 Dashboard'],['clients','👥 Clients'],['mail','✉️ Mail'],['tickets','🎫 Tickets'],['traffic','📡 Traffic & DLR'],['leads','🎯 Leads'],['tasks','✅ Tasks']]],
-  ['MONEY',[['payments','💶 Payments'],['crypto','₮ Crypto top-ups'],['invoices','🧾 Invoices'],['statements','📅 Statements']]],
-  ['SYSTEM',[['templates','🔤 Auto-templates'],['domains','🌐 Domains'],['settings','⚙️ Settings']]],
+  ['MONEY',[['payments','💶 Payments'],['postpaid','📆 Postpaid'],['crypto','₮ Crypto top-ups'],['invoices','🧾 Invoices'],['statements','📅 Statements']]],
+  ['SYSTEM',[['routestock','📦 Route stock'],['templates','🔤 Auto-templates'],['domains','🌐 Domains'],['settings','⚙️ Settings']]],
 ];
 const routeOpts=(routes,sel)=>`<option value="">— no route (can't send) —</option>`+routes.map(r=>`<option value="${r.id}" ${String(sel)===r.id?'selected':''}>${esc(r.name)} (${esc(r.type)})${r.is_active?'':' [inactive]'}</option>`).join('');
 
@@ -44,7 +44,7 @@ async function boot(){
   $('#nav').querySelectorAll('.nav-item').forEach(n=>n.onclick=()=>go(n.dataset.nav));
   go('dashboard');
 }
-function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',mail:'Mail',tickets:'Support tickets',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
+function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',mail:'Mail',tickets:'Support tickets',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',postpaid:'Postpaid clients',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',routestock:'Route stock',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
 let CUR='dashboard',CUR_ARG=null;
 async function go(k,arg){CUR=k;CUR_ARG=arg;setActive(k);const v=$('#view');v.innerHTML='<p class="muted">Loading…</p>';try{await VIEWS[k](v,arg);}catch(e){v.innerHTML=`<p class="err">${esc(e.message)}</p>`;}}
 window.__go=go;
@@ -123,7 +123,7 @@ VIEWS.clients=async v=>{
       <td><a onclick="window.__go('client','${esc(c.username)}')"><b>${esc(c.username)}</b></a></td>
       <td>${esc(p.company||'—')}</td><td>${esc(p.country||'—')}</td>
       <td>${(p.tags||[]).map(t=>`<span class="tagchip">${esc(t)}</span>`).join('')||'—'}</td>
-      <td>${eur3(c.credits)}</td><td>${eur3(c.cost_per_sms)}</td>
+      <td style="${c.credits<0?'color:#dc2626':''}">${c.credits<0?'-'+eur3(-c.credits):eur3(c.credits)}${c.billing_mode==='postpaid'?' <span class="badge purple" style="font-size:9px">postpaid</span>':''}</td><td>${eur3(c.cost_per_sms)}</td>
       <td><b>${eur(c.revenue)}</b><span class="muted" style="font-size:11px"> · ${c.payments}×</span></td>
       <td>${c.last_payment?fday(c.last_payment):'never'}</td>
       <td>${c.is_suspended?'<span class="badge red">suspended</span>':'<span class="badge green">active</span>'}</td>
@@ -139,9 +139,9 @@ VIEWS.client=async(v,username)=>{
   const p=d.profile||{};const u=d.user;
   const rname=id=>{const r=routes.find(x=>x.id===String(id));return r?r.name:null;};
   v.innerHTML=`<span class="back" onclick="window.__go('clients')">← All clients</span>
-  <h2 class="title">${esc(p.company||username)} <span class="muted" style="font-size:14px;font-weight:400">· ${esc(username)}</span> ${u.is_suspended?'<span class="badge red">suspended</span>':''}</h2>
+  <h2 class="title">${esc(p.company||username)} <span class="muted" style="font-size:14px;font-weight:400">· ${esc(username)}</span> ${u.billing_mode==='postpaid'?'<span class="badge purple">📆 postpaid</span>':''} ${u.is_suspended?'<span class="badge red">suspended</span>':''}</h2>
   <div class="cards">
-    <div class="card"><div class="k">Balance</div><div class="v sm">${eur3(u.credits)}</div></div>
+    <div class="card"><div class="k">${u.billing_mode==='postpaid'&&u.credits<0?'Owes (postpaid)':'Balance'}</div><div class="v sm" style="${u.credits<0?'color:#dc2626':''}">${u.billing_mode==='postpaid'&&u.credits<0?eur3(-u.credits):eur3(u.credits)}</div>${u.billing_mode==='postpaid'?`<div class="muted" style="font-size:11px">pay day: ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][u.pay_day!=null?u.pay_day:1]}${u.credit_limit!=null?` · soft limit €${u.credit_limit}`:''}</div>`:''}</div>
     <div class="card"><div class="k">Price / SMS</div><div class="v sm">${eur3(u.cost_per_sms)}</div></div>
     <div class="card"><div class="k">Lifetime revenue</div><div class="v sm">${eur(d.revenue)}</div></div>
     <div class="card"><div class="k">SMS last 30d</div><div class="v sm">${n2(d.usage30.parts)}<span class="muted" style="font-size:12px"> seg · ${eur3(d.usage30.credits)}</span></div></div>
@@ -211,11 +211,14 @@ VIEWS.client=async(v,username)=>{
     <div class="field"><label>Backup route (failover)</label><select id="ac_br">${routeOpts(routes,u.backup_route_id)}</select></div>
     <div class="row"><div class="field"><label>Price per SMS (€)</label><input id="ac_c" type="number" step="0.001" value="${u.cost_per_sms}"/></div>
     <div class="field"><label>Low-balance alert at (€, blank = global)</label><input id="ac_t" type="number" step="0.001" value="${u.low_balance_threshold!=null?u.low_balance_threshold:''}"/></div></div>
+    <div class="row"><div class="field"><label>💳 Billing mode</label><select id="ac_bm"><option value="prepaid" ${u.billing_mode!=='postpaid'?'selected':''}>Prepaid — blocks at €0</option><option value="postpaid" ${u.billing_mode==='postpaid'?'selected':''}>Postpaid — sends on credit, settles on pay day</option></select></div>
+    <div class="field"><label>Pay day</label><select id="ac_pd">${DAY_OPTS.map(([n,l])=>`<option value="${n}" ${(u.pay_day!=null?u.pay_day:1)===n?'selected':''}>${l}</option>`).join('')}</select></div></div>
+    <div class="field"><label>Soft credit limit (€, blank = no limit alert) — postpaid only; never blocks, alerts on Telegram</label><input id="ac_cl" type="number" step="0.01" min="0" value="${u.credit_limit!=null?u.credit_limit:''}"/></div>
     <label class="switch"><input type="checkbox" id="ac_s" ${u.is_suspended?'checked':''}/> Suspended (blocks all sending)</label>
     <div class="err" id="ac_err"></div><div class="actions"><button data-x>Cancel</button><button class="primary" id="ac_go">Save</button></div>`,
     (b,c)=>{b.querySelector('[data-x]').onclick=c;
       $('#ac_go',b).onclick=async()=>{try{
-        await api('/clients/'+encodeURIComponent(username)+'/account',{method:'PATCH',body:{route_id:$('#ac_r',b).value||null,backup_route_id:$('#ac_br',b).value||null,cost_per_sms:Number($('#ac_c',b).value),low_balance_threshold:$('#ac_t',b).value===''?null:Number($('#ac_t',b).value),is_suspended:$('#ac_s',b).checked}});
+        await api('/clients/'+encodeURIComponent(username)+'/account',{method:'PATCH',body:{route_id:$('#ac_r',b).value||null,backup_route_id:$('#ac_br',b).value||null,cost_per_sms:Number($('#ac_c',b).value),low_balance_threshold:$('#ac_t',b).value===''?null:Number($('#ac_t',b).value),billing_mode:$('#ac_bm',b).value,pay_day:Number($('#ac_pd',b).value),credit_limit:$('#ac_cl',b).value===''?null:Number($('#ac_cl',b).value),is_suspended:$('#ac_s',b).checked}});
         c();toast('Account saved');reload();
       }catch(e){$('#ac_err',b).textContent=e.message;}};});
   $('#cd_pw').onclick=()=>modal('Change password — '+username,`
@@ -285,10 +288,10 @@ function noteModal(refType,refId,refName,reload){
 }
 
 // ============================ PAYMENTS ============================
-function payModal(username,reload){
+function payModal(username,reload,preset){
   modal('Record payment'+(username?' — '+username:''),`
   ${username?'':'<div class="field"><label>Client username</label><input id="m_user"/></div>'}
-  <div class="row"><div class="field"><label>Amount (€)</label><input id="m_amt" type="number" step="0.01" min="0"/></div>
+  <div class="row"><div class="field"><label>Amount (€)</label><input id="m_amt" type="number" step="0.01" min="0" value="${preset?Number(preset):''}"/></div>
   <div class="field"><label>Method</label><select id="m_meth">${METHODS.filter(m=>m!=='usdt-trc20').map(m=>`<option>${m}</option>`).join('')}</select></div></div>
   <div class="field"><label>Reference (bank ref / txid / receipt #)</label><input id="m_ref"/></div>
   <div class="field"><label>Note</label><input id="m_note"/></div>
@@ -312,6 +315,80 @@ VIEWS.payments=async v=>{
   <span class="muted" style="font-size:12px;align-self:center">Recording a payment can auto-credit the client's balance and issue a numbered receipt PDF. USDT top-ups confirm automatically on-chain.</span></div>
   <div class="panel">${payTable(list)}</div>`;
   $('#p_new').onclick=()=>payModal(null,()=>go('payments'));
+};
+
+// ============================ POSTPAID ============================
+const DAY_OPTS=[[1,'Monday'],[2,'Tuesday'],[3,'Wednesday'],[4,'Thursday'],[5,'Friday'],[6,'Saturday'],[0,'Sunday']];
+VIEWS.postpaid=async v=>{
+  const d=await api('/postpaid');
+  v.innerHTML=`<h2 class="title">Postpaid clients</h2>
+  <div class="cards" style="grid-template-columns:repeat(3,1fr)">
+    <div class="card"><div class="k">Total outstanding</div><div class="v sm" style="color:${d.totals.outstanding>0?'#dc2626':'inherit'}">${eur(d.totals.outstanding)}</div></div>
+    <div class="card"><div class="k">Postpaid clients</div><div class="v sm">${d.totals.count}</div></div>
+    <div class="card"><div class="k">How it works</div><div class="muted" style="font-size:12px;line-height:1.5">Postpaid clients send on credit — the balance goes negative. On their pay day you get a Telegram digest; record the payment here to settle.</div></div>
+  </div>
+  <div class="panel"><div class="table-wrap"><table><thead><tr><th>Client</th><th>Pay day</th><th>Outstanding</th><th>Soft limit</th><th>Sent 7d</th><th>Last payment</th><th>Status</th><th></th></tr></thead><tbody>
+  ${d.clients.map(c=>`<tr>
+    <td><a onclick="window.__go('client','${esc(c.username)}')"><b>${esc(c.username)}</b></a></td>
+    <td>📆 ${esc(c.pay_day_name)}</td>
+    <td style="color:${c.outstanding>0?'#dc2626':'inherit'}"><b>${c.outstanding>0?eur(c.outstanding):'—'}</b>${c.balance>0?`<span class="muted" style="font-size:11px"> (in credit ${eur(c.balance)})</span>`:''}</td>
+    <td>${c.credit_limit!=null?eur(c.credit_limit)+(c.over_limit?' <span class="badge red">over</span>':''):'<span class="muted">none</span>'}</td>
+    <td>${n2(c.week.parts)}<span class="muted" style="font-size:11px"> seg · ${eur(c.week.credits)}</span></td>
+    <td>${c.last_payment?fday(c.last_payment):'never'}</td>
+    <td>${c.is_suspended?'<span class="badge red">suspended</span>':'<span class="badge green">active</span>'}</td>
+    <td>${c.outstanding>0?`<button class="sm primary" data-settle="${esc(c.username)}" data-amt="${c.outstanding}">💶 Settle</button>`:''}</td>
+  </tr>`).join('')||'<tr><td colspan="8" class="muted">No postpaid clients yet — open a client → 📡 Account / route → billing mode: postpaid.</td></tr>'}
+  </tbody></table></div></div>`;
+  v.querySelectorAll('[data-settle]').forEach(b=>b.onclick=()=>payModal(b.dataset.settle,()=>go('postpaid'),Number(b.dataset.amt)));
+};
+
+// ============================ ROUTE STOCK ============================
+VIEWS.routestock=async v=>{
+  const d=await api('/route-inventory');
+  const bar=r=>{if(r.pct==null)return '<span class="muted" style="font-size:12px">no stock tracking — record a top-up to start</span>';
+    const col=r.pct<=r.alert_pct?'#dc2626':r.pct<=r.alert_pct*1.5?'#d97706':'#16a34a';
+    return `<div style="background:#e5e7eb;border-radius:6px;height:10px;overflow:hidden"><div style="width:${Math.min(100,r.pct)}%;height:100%;background:${col}"></div></div>
+    <div style="font-size:12px;margin-top:4px"><b style="color:${col}">${r.pct}%</b> · ${n2(r.remaining)} of ${n2(r.total)} SMS left${r.used!=null?` · ${n2(r.used)} used`:''}</div>`;};
+  v.innerHTML=`<h2 class="title">Route stock — provider SMS inventory</h2>
+  <p class="muted" style="font-size:12px;margin-top:-6px">Record every top-up you buy from a provider. Stock counts down automatically per segment sent; a Telegram alert fires once when a route drops to its alert level.</p>
+  <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(290px,1fr))">
+  ${d.routes.map(r=>`<div class="card">
+    <div class="k">${esc(r.name)} <span class="muted">· ${esc(r.type)}</span> ${r.is_active?'':'<span class="badge gray">inactive</span>'} ${r.alerted?'<span class="badge red">low-stock alerted</span>':''}</div>
+    <div style="margin:10px 0">${bar(r)}</div>
+    <div style="font-size:11px" class="muted">Alert at ${r.alert_pct}% remaining</div>
+    <div style="margin-top:10px;display:flex;gap:6px">
+      <button class="sm primary" data-tu="${r.id}" data-n="${esc(r.name)}">+ Record top-up</button>
+      <button class="sm" data-cfg="${r.id}" data-n="${esc(r.name)}" data-pct="${r.alert_pct}" data-rem="${r.remaining!=null?r.remaining:''}">⚙️ Adjust</button>
+    </div>
+  </div>`).join('')||'<p class="muted">No routes configured.</p>'}
+  </div>
+  <div class="panel"><h3>🧾 Top-up history</h3><div class="table-wrap"><table><thead><tr><th>When</th><th>Route</th><th>SMS</th><th>Cost (€)</th><th>€/SMS</th><th>Note</th><th>By</th></tr></thead><tbody>
+  ${d.topups.map(t=>`<tr><td>${fdate(t.at)}</td><td><b>${esc(t.route_name)}</b></td><td>${t.sms>0?'+':''}${n2(t.sms)}</td><td>${t.cost?eur(t.cost):'—'}</td><td>${t.cost&&t.sms>0?'€'+(t.cost/t.sms).toFixed(4):'—'}</td><td>${esc(t.note||'—')}</td><td>${esc(t.by)}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">No top-ups recorded yet.</td></tr>'}
+  </tbody></table></div></div>`;
+  const reload=()=>go('routestock');
+  v.querySelectorAll('[data-tu]').forEach(b=>b.onclick=()=>modal('Record top-up — '+b.dataset.n,`
+    <p class="muted" style="font-size:12px">You bought SMS from the provider — record it so stock tracking & the low-stock alert stay accurate. Negative = correction.</p>
+    <div class="row"><div class="field"><label>SMS purchased</label><input id="t_sms" type="number" step="1" placeholder="20000"/></div>
+    <div class="field"><label>Cost paid (€, optional)</label><input id="t_cost" type="number" step="0.01" min="0"/></div></div>
+    <div class="field"><label>Note</label><input id="t_note" placeholder="invoice ref / package name…"/></div>
+    <div class="err" id="t_err"></div><div class="actions"><button data-x>Cancel</button><button class="primary" id="t_go">Record</button></div>`,
+    (bd,c)=>{bd.querySelector('[data-x]').onclick=c;$('#t_sms',bd).focus();
+      $('#t_go',bd).onclick=async()=>{try{
+        const r=await api('/routes/'+b.dataset.tu+'/topup',{method:'POST',body:{sms:Number($('#t_sms',bd).value),cost:Number($('#t_cost',bd).value)||0,note:$('#t_note',bd).value}});
+        c();toast(`Stock: ${n2(r.remaining)} of ${n2(r.total)} SMS`);reload();
+      }catch(e){$('#t_err',bd).textContent=e.message;}};}));
+  v.querySelectorAll('[data-cfg]').forEach(b=>b.onclick=()=>modal('Stock settings — '+b.dataset.n,`
+    <div class="row"><div class="field"><label>Alert when remaining ≤ (%)</label><input id="s_pct" type="number" min="1" max="99" value="${b.dataset.pct}"/></div>
+    <div class="field"><label>Correct remaining (SMS, blank = keep)</label><input id="s_rem" type="number" step="1" value="${b.dataset.rem}" placeholder="match provider dashboard"/></div></div>
+    <p class="muted" style="font-size:12px">Use "correct remaining" if the provider's dashboard disagrees (e.g. they count differently). Re-arms the alert.</p>
+    <div class="err" id="s_err"></div><div class="actions"><button data-x>Cancel</button><button class="primary" id="s_go">Save</button></div>`,
+    (bd,c)=>{bd.querySelector('[data-x]').onclick=c;
+      $('#s_go',bd).onclick=async()=>{try{
+        const body={alert_pct:Number($('#s_pct',bd).value)};
+        if($('#s_rem',bd).value!=='')body.remaining=Number($('#s_rem',bd).value);
+        await api('/routes/'+b.dataset.cfg+'/inventory',{method:'PATCH',body});
+        c();toast('Saved');reload();
+      }catch(e){$('#s_err',bd).textContent=e.message;}};}));
 };
 
 // ============================ CRYPTO ============================

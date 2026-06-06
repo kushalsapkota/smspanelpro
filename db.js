@@ -50,6 +50,13 @@ const UserSchema = new Schema({
   // € balance at/below which a Telegram low-balance alert fires (null = use global setting)
   low_balance_threshold: { type: Number, default: null },
 
+  // postpaid billing: balance may go NEGATIVE (debt the client settles on pay_day).
+  // credit_limit is a SOFT limit in € — sends are never blocked, but an alert fires
+  // when the debt exceeds it (null = no limit alert). pay_day: 0=Sun … 6=Sat.
+  billing_mode: { type: String, enum: ['prepaid', 'postpaid'], default: 'prepaid', index: true },
+  credit_limit: { type: Number, default: null },
+  pay_day: { type: Number, default: 1 },
+
   // integrations
   webhook_url: { type: String, default: '' },
   webhook_secret: { type: String, default: '' },
@@ -80,9 +87,16 @@ const RouteSchema = new Schema({
   // provider-specific extras (field maps, headers, etc.)
   config: { type: Object, default: {} },
 
-  // route-level credit pool
+  // route-level credit pool (= SMS segments remaining at the provider; decremented per part sent)
   route_credits: { type: Number, default: null },
   route_credit_threshold: { type: Number, default: 0 },
+
+  // provider stock tracking: inventory_total = SMS topped up at the provider (sum of recorded
+  // top-ups); route_credits above is the REMAINING stock. When remaining/total drops to
+  // inventory_alert_pct %, a Telegram alert fires once (inventory_alerted resets on top-up).
+  inventory_total: { type: Number, default: 0 },
+  inventory_alert_pct: { type: Number, default: 40 },
+  inventory_alerted: { type: Boolean, default: false },
 
   // Does this provider deliver REAL delivery receipts? If false (e.g. QuickConnect), we never
   // claim 'delivered' to clients — only 'accepted' (carrier accepted, delivery unconfirmed).
@@ -253,6 +267,16 @@ const UsageEventSchema = new Schema({
 }, { timestamps: false });
 UsageEventSchema.index({ username: 1, at: 1 });
 
+// Operator-recorded SMS top-ups at an upstream provider (route stock purchases).
+const RouteTopupSchema = new Schema({
+  route_id: { type: Schema.Types.ObjectId, ref: 'Route', index: true },
+  route_name: { type: String, default: '' },
+  sms: { type: Number, required: true },        // SMS segments purchased (negative = correction)
+  cost: { type: Number, default: 0 },           // € paid to the provider (optional, for margin math)
+  note: { type: String, default: '' },
+  by: { type: String, default: 'admin' },
+}, { timestamps: true });
+
 // Per-client API keys for the public HTTP send API (alternative to username/password).
 const ApiKeySchema = new Schema({
   key: { type: String, required: true, unique: true, index: true },
@@ -276,7 +300,7 @@ const defs = {
   ActiveConnection: ActiveConnectionSchema, ResellerBill: ResellerBillSchema,
   WebhookLog: WebhookLogSchema, DropCommand: DropCommandSchema,
   Invoice: InvoiceSchema, Payment: PaymentSchema,
-  UsageEvent: UsageEventSchema, ApiKey: ApiKeySchema,
+  UsageEvent: UsageEventSchema, ApiKey: ApiKeySchema, RouteTopup: RouteTopupSchema,
 };
 
 let models = {};
@@ -331,13 +355,16 @@ async function snapBalance(updated) {
 }
 
 // Atomically deduct money (cost_per_sms * parts), to 0.001 precision. Returns {ok, balance, cost}.
+// Prepaid: rejected when the balance can't cover the cost. Postpaid: always charged —
+// the balance goes NEGATIVE (debt the client settles on their pay day).
 async function deductCredit(username, parts, opts = {}) {
   const user = await models.User.findOne({ username }).exec ? await models.User.findOne({ username }).exec() : await models.User.findOne({ username });
   if (!user) return { ok: false, balance: 0, reason: 'no user' };
   const cost = round3((user.cost_per_sms || 1) * (parts || 1));
-  if (round3(user.credits || 0) < cost) return { ok: false, balance: round3(user.credits || 0), reason: 'insufficient' };
+  const postpaid = user.billing_mode === 'postpaid';
+  if (!postpaid && round3(user.credits || 0) < cost) return { ok: false, balance: round3(user.credits || 0), reason: 'insufficient' };
   const updated = await models.User.findOneAndUpdate(
-    { username, credits: { $gte: cost } },
+    postpaid ? { username } : { username, credits: { $gte: cost } },
     { $inc: { credits: -cost } },
     { new: true }
   );

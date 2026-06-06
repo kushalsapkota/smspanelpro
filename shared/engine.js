@@ -38,6 +38,19 @@ async function globalLowBalThreshold() {
   return _globalLowBal;
 }
 async function maybeLowBalanceAlert(user, balance) {
+  // Postpaid clients run a negative balance by design — instead of a low-balance alert,
+  // fire a SOFT credit-limit alert when their debt crosses user.credit_limit (never blocks).
+  if (user.billing_mode === 'postpaid') {
+    const lim = user.credit_limit;
+    if (lim == null || lim <= 0 || balance > -lim) return;
+    const now = Date.now();
+    if ((lowBalCooldown.get(user.username) || 0) > now - LOWBAL_COOLDOWN_MS) return;
+    lowBalCooldown.set(user.username, now);
+    const owed = db.round3(-balance);
+    telegram.systemAlert(`🟠 Credit limit: postpaid client <b>${user.username}</b> now owes €${owed} (soft limit €${db.round3(lim)}). Sending continues — consider collecting or suspending.`);
+    telegram.userAlert(user, `🟠 Your outstanding balance is €${owed}, above your €${db.round3(lim)} credit line. Please arrange payment.`);
+    return;
+  }
   const thr = (user.low_balance_threshold != null) ? user.low_balance_threshold : await globalLowBalThreshold();
   if (!thr || balance > thr) return;
   const now = Date.now();
@@ -46,6 +59,27 @@ async function maybeLowBalanceAlert(user, balance) {
   const bal = db.round3(balance);
   telegram.systemAlert(`⚠️ Low balance: <b>${user.username}</b> is at €${bal} (≤ threshold €${db.round3(thr)}). Top-up needed.`);
   telegram.userAlert(user, `⚠️ Your balance is low: €${bal}. Please top up to keep sending.`);
+}
+
+// ---- route stock alert (provider SMS inventory, recorded via CRM Route stock) ----
+// Fires ONCE when remaining/inventory_total drops to inventory_alert_pct % — the
+// inventory_alerted flag is claimed atomically and reset when a top-up is recorded.
+async function maybeRouteStockAlert(routeId, remaining) {
+  const route = await db.Route.findById(routeId);
+  if (!route || !(route.inventory_total > 0)) return;
+  const pct = (remaining / route.inventory_total) * 100;
+  const thr = (route.inventory_alert_pct != null) ? route.inventory_alert_pct : 40;
+  if (pct > thr) return;
+  const claimed = await db.Route.findOneAndUpdate(
+    { _id: routeId, inventory_alerted: { $ne: true } },
+    { $set: { inventory_alerted: true } }
+  );
+  if (!claimed) return; // someone already alerted for this stock cycle
+  telegram.systemAlert(
+    `📦 <b>Route stock low: ${route.name}</b>\n` +
+    `${Math.max(0, Math.round(pct))}% left — ${remaining.toLocaleString()} of ${route.inventory_total.toLocaleString()} SMS.\n` +
+    `Top up with the provider, then record it in CRM → Route stock.`
+  );
 }
 
 // ---- in-memory trackers ----
@@ -241,7 +275,10 @@ async function fireDispatch(p) {
     if (!providers.isHealthy(route._id)) { lastErr = 'route suspended (circuit open)'; continue; }
     const r = await providers.dispatch(route, p.dest, p.finalText, p.source);
     if (r.success) {
-      if (route.route_credits != null) await db.deductRouteCredit(route._id, p.parts).catch(() => {});
+      if (route.route_credits != null) {
+        const remaining = await db.deductRouteCredit(route._id, p.parts).catch(() => null);
+        if (remaining != null) maybeRouteStockAlert(route._id, remaining).catch(() => {});
+      }
       // DLR honesty: only claim 'delivered' if the route actually reports real receipts
       // (route.provides_dlr). Otherwise the truth is 'accepted' — carrier took it, delivery
       // unconfirmed. We NEVER fabricate a 'delivered' for providers like QuickConnect.
@@ -302,4 +339,4 @@ async function postWebhook(user, dlr) {
 
 function genId() { return (Date.now().toString() + Math.floor(Math.random() * 1000)).slice(-12); }
 
-module.exports = { accept, fireDispatch, setDlrDeliver, deliverDlr, postWebhook, S, pickRoutes, checkTemplate, injectCode };
+module.exports = { accept, fireDispatch, setDlrDeliver, deliverDlr, postWebhook, S, pickRoutes, checkTemplate, injectCode, maybeLowBalanceAlert, maybeRouteStockAlert };

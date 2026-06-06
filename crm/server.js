@@ -150,7 +150,140 @@ app.patch('/api/clients/:username/account', wrap(async (req, res) => {
   if ('max_mps' in b) set.max_mps = Math.max(1, Number(b.max_mps) || 10);
   if ('bypass_template' in b) set.bypass_template = !!b.bypass_template; // false = auto-template (numbers-only)
   if ('low_balance_threshold' in b) set.low_balance_threshold = b.low_balance_threshold === null || b.low_balance_threshold === '' ? null : Number(b.low_balance_threshold);
+  if ('billing_mode' in b) {
+    if (!['prepaid', 'postpaid'].includes(b.billing_mode)) return res.status(400).json({ error: 'billing_mode must be prepaid or postpaid' });
+    set.billing_mode = b.billing_mode;
+  }
+  if ('credit_limit' in b) set.credit_limit = b.credit_limit === null || b.credit_limit === '' ? null : Math.max(0, Number(b.credit_limit) || 0);
+  if ('pay_day' in b) {
+    const d = Number(b.pay_day);
+    if (!(d >= 0 && d <= 6)) return res.status(400).json({ error: 'pay_day must be 0 (Sun) … 6 (Sat)' });
+    set.pay_day = d;
+  }
   await db.User.updateOne({ _id: u._id }, { $set: set });
+  if (set.billing_mode && set.billing_mode !== u.billing_mode) {
+    await M.CrmActivity.create({
+      ref_type: 'client', ref_id: username, ref_name: username, kind: 'system',
+      body: `Billing mode → ${set.billing_mode}` + (set.billing_mode === 'postpaid' ? ` (pay day ${DAY_NAMES[set.pay_day != null ? set.pay_day : (u.pay_day != null ? u.pay_day : 1)]}${set.credit_limit != null ? `, soft limit €${set.credit_limit}` : ''})` : ''),
+      by: req.session.admin.username,
+    }).catch(() => {});
+  }
+  res.json({ ok: true });
+}));
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// ---------------- postpaid billing ----------------
+// Who owes what: every postpaid client with outstanding (= negative balance), 7-day burn.
+app.get('/api/postpaid', wrap(async (req, res) => {
+  const users = await db.User.find({ billing_mode: 'postpaid', role: { $ne: 'admin' } }).sort({ username: 1 });
+  const names = users.map((u) => u.username);
+  const weekAgo = new Date(Date.now() - 7 * 864e5);
+  const [paid, burn] = await Promise.all([
+    db.Payment.aggregate([
+      { $match: { status: 'confirmed', client_username: { $in: names } } },
+      { $group: { _id: '$client_username', total: { $sum: '$amount' }, last: { $max: '$createdAt' } } },
+    ]),
+    db.UsageEvent.aggregate([
+      { $match: { username: { $in: names }, at: { $gte: weekAgo }, status: 'sent' } },
+      { $group: { _id: '$username', credits: { $sum: '$credits' }, parts: { $sum: '$parts' } } },
+    ]),
+  ]);
+  const pmap = {}; paid.forEach((p) => pmap[p._id] = p);
+  const bmap = {}; burn.forEach((b2) => bmap[b2._id] = b2);
+  const rows = users.map((u) => ({
+    username: u.username,
+    balance: db.round3(u.credits),
+    outstanding: db.round3(Math.max(0, -(u.credits || 0))),
+    credit_limit: u.credit_limit,
+    over_limit: u.credit_limit != null && u.credit_limit > 0 && (u.credits || 0) <= -u.credit_limit,
+    pay_day: u.pay_day != null ? u.pay_day : 1,
+    pay_day_name: DAY_NAMES[u.pay_day != null ? u.pay_day : 1],
+    is_suspended: u.is_suspended,
+    last_payment: pmap[u.username] ? pmap[u.username].last : null,
+    paid_total: pmap[u.username] ? db.round3(pmap[u.username].total) : 0,
+    week: bmap[u.username] ? { credits: db.round3(bmap[u.username].credits), parts: bmap[u.username].parts } : { credits: 0, parts: 0 },
+  }));
+  res.json({
+    clients: rows,
+    totals: { outstanding: db.round3(rows.reduce((a, r) => a + r.outstanding, 0)), count: rows.length },
+  });
+}));
+
+// ---------------- route stock (provider SMS inventory) ----------------
+app.get('/api/route-inventory', wrap(async (req, res) => {
+  const [routes, topups] = await Promise.all([
+    db.Route.find({}).sort({ name: 1 }),
+    db.RouteTopup.find({}).sort({ createdAt: -1 }).limit(50),
+  ]);
+  res.json({
+    routes: routes.map((r) => {
+      const remaining = r.route_credits != null ? r.route_credits : null;
+      const total = r.inventory_total || 0;
+      return {
+        id: String(r._id), name: r.name, type: r.type, is_active: r.is_active,
+        remaining, total,
+        used: remaining != null ? Math.max(0, total - remaining) : null,
+        pct: remaining != null && total > 0 ? Math.max(0, Math.round((remaining / total) * 100)) : null,
+        alert_pct: r.inventory_alert_pct != null ? r.inventory_alert_pct : 40,
+        alerted: !!r.inventory_alerted,
+      };
+    }),
+    topups: topups.map((t) => ({
+      id: String(t._id), route_id: String(t.route_id), route_name: t.route_name,
+      sms: t.sms, cost: t.cost, note: t.note, by: t.by, at: t.createdAt,
+    })),
+  });
+}));
+
+// Record an SMS top-up purchased at the provider: adds to remaining stock + total, re-arms the alert.
+app.post('/api/routes/:id/topup', wrap(async (req, res) => {
+  const route = await db.Route.findById(req.params.id);
+  if (!route) return res.status(404).json({ error: 'route not found' });
+  const b = req.body || {};
+  const sms = Math.round(Number(b.sms));
+  if (!Number.isFinite(sms) || sms === 0) return res.status(400).json({ error: 'sms amount required (negative = correction)' });
+  // First top-up on a route activates stock tracking (route_credits was null = disabled).
+  const update = route.route_credits == null
+    ? { $set: { route_credits: Math.max(0, sms), inventory_alerted: false }, $inc: { inventory_total: sms } }
+    : { $inc: { route_credits: sms, inventory_total: sms }, $set: { inventory_alerted: false } };
+  const updated = await db.Route.findByIdAndUpdate(route._id, update, { new: true });
+  await db.RouteTopup.create({
+    route_id: route._id, route_name: route.name, sms,
+    cost: db.round3(b.cost || 0), note: String(b.note || '').trim(), by: req.session.admin.username,
+  });
+  telegram.systemAlert(
+    `📦 <b>Route stock recorded: ${route.name}</b>\n` +
+    `${sms > 0 ? '+' : ''}${sms.toLocaleString()} SMS${b.cost ? ` (€${db.round3(b.cost).toFixed(2)})` : ''}` +
+    ` → ${Number(updated.route_credits || 0).toLocaleString()} of ${Number(updated.inventory_total || 0).toLocaleString()} remaining.`
+  ).catch(() => {});
+  res.json({ ok: true, remaining: updated.route_credits, total: updated.inventory_total });
+}));
+
+// Adjust stock settings: alert %, or correct the remaining counter to match the provider's dashboard.
+app.patch('/api/routes/:id/inventory', wrap(async (req, res) => {
+  const route = await db.Route.findById(req.params.id);
+  if (!route) return res.status(404).json({ error: 'route not found' });
+  const b = req.body || {};
+  const set = {};
+  if ('alert_pct' in b) {
+    const p = Number(b.alert_pct);
+    if (!(p >= 1 && p <= 99)) return res.status(400).json({ error: 'alert_pct must be 1–99' });
+    set.inventory_alert_pct = p;
+  }
+  if ('remaining' in b) {
+    const r2 = Math.round(Number(b.remaining));
+    if (!Number.isFinite(r2) || r2 < 0) return res.status(400).json({ error: 'remaining must be ≥ 0' });
+    set.route_credits = r2;
+    set.inventory_alerted = false; // corrected stock re-arms the alert
+    if (r2 > (route.inventory_total || 0)) set.inventory_total = r2;
+  }
+  if ('total' in b) {
+    const t = Math.round(Number(b.total));
+    if (!Number.isFinite(t) || t < 0) return res.status(400).json({ error: 'total must be ≥ 0' });
+    set.inventory_total = t;
+  }
+  await db.Route.updateOne({ _id: route._id }, { $set: set });
   res.json({ ok: true });
 }));
 
@@ -332,6 +465,7 @@ app.get('/api/clients', wrap(async (req, res) => {
   res.json(users.map((u) => ({
     id: String(u._id), username: u.username, role: u.role,
     credits: db.round3(u.credits), cost_per_sms: u.cost_per_sms,
+    billing_mode: u.billing_mode || 'prepaid',
     is_suspended: u.is_suspended, is_active: u.is_active, created: u.createdAt,
     profile: pmap[u.username] || null,
     revenue: paymap[u.username] ? db.round3(paymap[u.username].total) : 0,
@@ -391,6 +525,9 @@ app.get('/api/clients/:username', wrap(async (req, res) => {
       id: String(user._id), username, credits: db.round3(user.credits), cost_per_sms: user.cost_per_sms,
       is_suspended: user.is_suspended, is_active: user.is_active, created: user.createdAt,
       low_balance_threshold: user.low_balance_threshold,
+      billing_mode: user.billing_mode || 'prepaid',
+      credit_limit: user.credit_limit,
+      pay_day: user.pay_day != null ? user.pay_day : 1,
       route_id: user.route_id ? String(user.route_id) : null,
       backup_route_id: user.backup_route_id ? String(user.backup_route_id) : null,
       allowed_ips: user.allowed_ips || [],
@@ -1123,6 +1260,9 @@ app.post('/api/crm-settings', wrap(async (req, res) => {
     smtp,
     mail: { ...cur.mail, ...(b.mail || {}) }, // keeps runtime poller state (last_uid) when the UI saves only signature/templates/notify
   };
+  // carry over runtime markers that live outside the settings form (e.g. postpaid digest debounce)
+  const raw = await db.Setting.findOne({ key: 'crm' });
+  if (raw && raw.value && raw.value.postpaid_last_digest) value.postpaid_last_digest = raw.value.postpaid_last_digest;
   await db.Setting.findOneAndUpdate({ key: 'crm' }, { $set: { key: 'crm', value } }, { upsert: true });
   res.json(value);
 }));
@@ -1162,6 +1302,27 @@ async function reminderTick() {
         } catch (_) {}
       }
       inv.last_overdue_alert = now; await inv.save();
+    }
+    // Postpaid pay-day digest — once per local day (Asia/Kathmandu), lists every postpaid
+    // client whose pay_day is today with their outstanding balance.
+    const tzDay = new Intl.DateTimeFormat('en-CA', { timeZone: db.DEFAULT_TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+    const sCrm = await db.Setting.findOne({ key: 'crm' });
+    if (((sCrm && sCrm.value && sCrm.value.postpaid_last_digest) || '') !== tzDay) {
+      await db.Setting.findOneAndUpdate({ key: 'crm' }, { $set: { 'value.postpaid_last_digest': tzDay } }, { upsert: true });
+      const wd = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+        .indexOf(new Intl.DateTimeFormat('en-US', { timeZone: db.DEFAULT_TZ, weekday: 'short' }).format(now));
+      const dueToday = await db.User.find({ billing_mode: 'postpaid', role: { $ne: 'admin' }, pay_day: wd });
+      if (dueToday.length) {
+        const lines = dueToday.map((u) => {
+          const owed = db.round3(Math.max(0, -(u.credits || 0)));
+          return `• <b>${u.username}</b> — ${owed > 0 ? `owes <b>€${owed.toFixed(2)}</b>` : `nothing due (balance €${db.round3(u.credits || 0).toFixed(2)})`}${u.credit_limit != null && u.credit_limit > 0 && (u.credits || 0) <= -u.credit_limit ? ' 🟠 over limit' : ''}`;
+        });
+        const totalOwed = db.round3(dueToday.reduce((a, u) => a + Math.max(0, -(u.credits || 0)), 0));
+        await telegram.systemAlert(
+          `📆 <b>Postpaid pay day — ${DAY_NAMES[wd]}</b>\n${lines.join('\n')}\n` +
+          `Total due: <b>€${totalOwed.toFixed(2)}</b>\nRecord payments in CRM → Postpaid.`
+        ).catch(() => {});
+      }
     }
   } catch (e) { console.error('[crm] reminders:', e.message); }
 }
