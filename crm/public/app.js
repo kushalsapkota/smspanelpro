@@ -209,6 +209,7 @@ VIEWS.client=async(v,username)=>{
         </div>
         ${tf.dlrTotal?`<div style="margin-top:10px">${Object.entries(tf.dlr).filter(([k,n])=>n>0).map(([k,n])=>`<span class="badge ${dlrColor[k]||'gray'}" style="margin:0 4px 4px 0">${k}: ${n2(n)}</span>`).join('')}</div>`:'<p class="muted" style="font-size:12px">No messages in the last 7 days.</p>'}
       </div>`:''}
+      <div class="panel"><h3>📊 Usage & delivery <span class="right" id="ud_rng"></span></h3><div id="ud_box"><p class="muted">Loading…</p></div></div>
       <div class="panel"><h3>💳 Payments</h3>${payTable(d.payments)}</div>
       <div class="panel"><h3>🧾 Invoices & receipts</h3>${invTable(d.invoices)}</div>
       ${d.intents.length?`<div class="panel"><h3>₮ Crypto intents</h3>${intentTable(d.intents)}</div>`:''}
@@ -229,6 +230,34 @@ VIEWS.client=async(v,username)=>{
     </div>
   </div>`;
   const reload=()=>go('client',username);
+  // ---- usage & delivery graph (permanent dlrlog archive, per-day stacked bars) ----
+  const tzday=ms=>new Intl.DateTimeFormat('en-CA',{timeZone:VIEW_TZ}).format(new Date(ms));
+  let udN=14;
+  const udLoad=async()=>{
+    $('#ud_rng').innerHTML=[7,14,30,90].map(n=>`<button class="sm ${n===udN?'primary':''}" data-n="${n}" style="margin-left:4px">${n}d</button>`).join('');
+    $('#ud_rng').querySelectorAll('button').forEach(b=>b.onclick=()=>{udN=Number(b.dataset.n);udLoad();});
+    try{
+      const dh=await api(`/traffic/dlr-history?username=${encodeURIComponent(username)}&from=${tzday(Date.now()-(udN-1)*864e5)}&to=${tzday(Date.now())}`);
+      const map={};(dh.days||[]).forEach(r=>map[r.day]=r);
+      const days=[];for(let i=udN-1;i>=0;i--){const k=tzday(Date.now()-i*864e5);days.push(map[k]||{day:k,messages:0,parts:0,delivered:0,failed:0,und:0,oth:0});}
+      const tot=days.reduce((a,r)=>({d:a.d+r.delivered,u:a.u+(r.und||0),f:a.f+r.failed,o:a.o+(r.oth||0),m:a.m+r.messages,p:a.p+r.parts}),{d:0,u:0,f:0,o:0,m:0,p:0});
+      const max=Math.max(1,...days.map(r=>r.messages));
+      const seg=(n,cls)=>n?`<i class="${cls}" style="height:${Math.max(2,Math.round(n/max*120))}px"></i>`:'';
+      const lblEvery=days.length>20?Math.ceil(days.length/15):1;
+      $('#ud_box').innerHTML=`
+        <div style="margin-bottom:8px">
+          <span class="badge green">delivered: ${n2(tot.d)}</span>
+          <span class="badge yellow">undelivered: ${n2(tot.u)}</span>
+          <span class="badge red">failed: ${n2(tot.f)}</span>
+          ${tot.o?`<span class="badge gray">pending/unknown: ${n2(tot.o)}</span>`:''}
+          <span class="muted" style="font-size:11px"> · ${n2(tot.m)} msg · ${n2(tot.p)} seg · ${tot.m?Math.round(tot.d/tot.m*100):0}% delivered</span>
+        </div>
+        ${tot.m?`<div class="chart">${days.map(r=>`<div class="bar sbar"><span>${esc(r.day.slice(5))} · D ${n2(r.delivered)} · U ${n2(r.und||0)} · F ${n2(r.failed)}${r.oth?` · ? ${n2(r.oth)}`:''}</span>${seg(r.delivered,'sg-d')}${seg(r.und||0,'sg-u')}${seg(r.failed,'sg-f')}${seg(r.oth||0,'sg-o')}</div>`).join('')}</div>
+        <div class="chart-x">${days.map((r,i)=>`<div>${i%lblEvery?'':esc(r.day.slice(5))}</div>`).join('')}</div>`
+        :`<p class="muted">No messages in the last ${udN} days.</p>`}`;
+    }catch(e){$('#ud_box').innerHTML=`<p class="err">${esc(e.message)}</p>`;}
+  };
+  udLoad();
   $('#cd_adj').onclick=()=>modal('Adjust balance — '+username,`
     <p class="muted" style="font-size:12px">Directly add or remove credit (bonus, correction, opening balance). Current balance <b>${eur3(u.credits)}</b>. This is <b>not</b> a payment — use "Record payment" for actual money received (it also makes a receipt).</p>
     <div class="row"><div class="field"><label>Amount (€) — negative to deduct</label><input id="aj_v" type="number" step="0.001" placeholder="e.g. 18 or -5"/></div>

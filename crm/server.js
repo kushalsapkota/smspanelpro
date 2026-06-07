@@ -407,10 +407,14 @@ app.get('/api/traffic/dlr-history', wrap(async (req, res) => {
     parts += r.parts || 0; credits += r.credits || 0;
     if (r.status === 'failed') failed++; else sent++;
     const day = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(r.at));
-    const b = byDay[day] || (byDay[day] = { day, messages: 0, parts: 0, delivered: 0, failed: 0 });
+    const b = byDay[day] || (byDay[day] = { day, messages: 0, parts: 0, delivered: 0, failed: 0, und: 0, oth: 0 });
     b.messages++; b.parts += r.parts || 0;
     if (r.dlr_status === 'delivered' || r.dlr_status === 'accepted') b.delivered++;
     if (r.status === 'failed') b.failed++;
+    // mutually-exclusive stack segments (delivered + und + failed + oth === messages):
+    // failed records carry dlr 'undelivered' too — count them only as failed.
+    else if (['undelivered', 'rejected', 'expired'].includes(r.dlr_status)) b.und++;
+    else if (!(r.dlr_status === 'delivered' || r.dlr_status === 'accepted')) b.oth++;
   }
   const total = recs.length;
   res.json({

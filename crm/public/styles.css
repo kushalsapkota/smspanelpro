@@ -95,6 +95,10 @@ td.wrap{white-space:normal;max-width:320px}
 .bar span{position:absolute;top:-18px;left:50%;transform:translateX(-50%);font-size:10px;color:var(--muted);opacity:0}
 .bar:hover span{opacity:1}
 .chart-x{display:flex;gap:6px;margin-top:6px}.chart-x>*{flex:1;text-align:center;font-size:9px;color:var(--muted);overflow:hidden}
+/* stacked delivery bars (client usage graph) */
+.sbar{display:flex;flex-direction:column-reverse;background:rgba(255,255,255,.04);gap:1px}
+.sbar i{display:block;width:100%;border-radius:2px}
+.sbar .sg-d{background:var(--green)}.sbar .sg-u{background:var(--yellow)}.sbar .sg-f{background:var(--red)}.sbar .sg-o{background:var(--muted)}
 
 /* modal */
 .modal-bg{position:fixed;inset:0;background:rgba(3,6,12,.7);display:grid;place-items:center;z-index:80;backdrop-filter:blur(3px)}
