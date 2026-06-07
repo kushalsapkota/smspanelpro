@@ -463,16 +463,62 @@ app.get('/api/traffic/clients', wrap(async (req, res) => {
   })) });
 }));
 
+// ---------------- online / offline status ----------------
+// "Online" = the SMPP engine's 5s heartbeat (Setting smpp_heartbeat) lists the user as bound.
+// If the heartbeat itself is stale the engine is down → everyone reported offline.
+const HEARTBEAT_STALE_MS = 30 * 1000;     // engine writes every 5s
+const API_ACTIVE_MS = 10 * 60 * 1000;     // HTTP-API clients never bind; "active" = sent in last 10 min
+
+async function getOnlineSet() {
+  const hbDoc = await db.Setting.findOne({ key: 'smpp_heartbeat' });
+  const hb = hbDoc && hbDoc.value ? hbDoc.value : null;
+  const at = hb && hb.at ? new Date(hb.at) : null;
+  const up = !!at && (Date.now() - at.getTime() < HEARTBEAT_STALE_MS);
+  return { up, at, set: new Set(up ? (hb.online || []) : []) };
+}
+
+app.get('/api/status/online', wrap(async (req, res) => {
+  const [hb, users, conns, lastSends] = await Promise.all([
+    getOnlineSet(),
+    db.User.find({ role: { $ne: 'admin' } }).sort({ username: 1 }),
+    db.ActiveConnection.find({ is_connected: true }).sort({ bound_at: -1 }),
+    db.UsageEvent.aggregate([{ $group: { _id: '$username', last: { $max: '$at' } } }]),
+  ]);
+  const connMap = {}; conns.forEach((c) => { if (!connMap[c.username]) connMap[c.username] = c; });
+  const sendMap = {}; lastSends.forEach((s) => sendMap[s._id] = s.last);
+  const now = Date.now();
+  const rows = users.map((u) => {
+    const online = hb.set.has(u.username);
+    const c = online ? connMap[u.username] : null;
+    const lastSend = sendMap[u.username] || null;
+    const apiActive = !online && lastSend && (now - new Date(lastSend).getTime() < API_ACTIVE_MS);
+    return {
+      username: u.username, online, api_active: !!apiActive, is_suspended: u.is_suspended,
+      ip: c ? c.ip : (u.last_bound_ip || ''), bind_type: c ? c.bind_type : '',
+      bound_at: c ? c.bound_at : null,
+      last_bound_at: u.last_bound_at || null, last_send: lastSend,
+    };
+  });
+  res.json({
+    bridge_up: hb.up, heartbeat_at: hb.at,
+    online: rows.filter((r) => r.online).length,
+    api_active: rows.filter((r) => r.api_active).length,
+    offline: rows.filter((r) => !r.online && !r.api_active).length,
+    total: rows.length, clients: rows,
+  });
+}));
+
 // ---------------- clients (CRM view over Users) ----------------
 app.get('/api/clients', wrap(async (req, res) => {
   const users = await db.User.find({ role: { $ne: 'admin' } }).sort({ createdAt: -1 });
   const usernames = users.map((u) => u.username);
-  const [profiles, paid] = await Promise.all([
+  const [profiles, paid, hb] = await Promise.all([
     M.CrmProfile.find({ username: { $in: usernames } }),
     db.Payment.aggregate([
       { $match: { status: 'confirmed', client_username: { $in: usernames } } },
       { $group: { _id: '$client_username', total: { $sum: '$amount' }, n: { $sum: 1 }, last: { $max: '$createdAt' } } },
     ]),
+    getOnlineSet(),
   ]);
   const pmap = {}; profiles.forEach((p) => pmap[p.username] = p);
   const paymap = {}; paid.forEach((p) => paymap[p._id] = p);
@@ -481,6 +527,7 @@ app.get('/api/clients', wrap(async (req, res) => {
     credits: db.round3(u.credits), cost_per_sms: u.cost_per_sms,
     billing_mode: u.billing_mode || 'prepaid',
     is_suspended: u.is_suspended, is_active: u.is_active, created: u.createdAt,
+    online: hb.set.has(u.username),
     profile: pmap[u.username] || null,
     revenue: paymap[u.username] ? db.round3(paymap[u.username].total) : 0,
     payments: paymap[u.username] ? paymap[u.username].n : 0,
@@ -521,7 +568,7 @@ app.get('/api/clients/:username', wrap(async (req, res) => {
   const user = await db.User.findOne({ username });
   if (!user) return res.status(404).json({ error: 'not found' });
   const monthAgo = new Date(Date.now() - 30 * 864e5);
-  const [profile, activities, payments, invoices, transactions, usage, intents] = await Promise.all([
+  const [profile, activities, payments, invoices, transactions, usage, intents, hb] = await Promise.all([
     M.CrmProfile.findOne({ username }),
     M.CrmActivity.find({ ref_type: 'client', ref_id: username }).sort({ createdAt: -1 }).limit(100),
     db.Payment.find({ client_username: username }).sort({ createdAt: -1 }).limit(50),
@@ -532,12 +579,14 @@ app.get('/api/clients/:username', wrap(async (req, res) => {
       { $group: { _id: null, parts: { $sum: '$parts' }, credits: { $sum: '$credits' }, n: { $sum: 1 } } },
     ]),
     M.CryptoIntent.find({ username }).sort({ createdAt: -1 }).limit(10),
+    getOnlineSet(),
   ]);
   const revenue = payments.filter((p) => p.status === 'confirmed').reduce((a, p) => a + p.amount, 0);
   res.json({
     user: {
       id: String(user._id), username, credits: db.round3(user.credits), cost_per_sms: user.cost_per_sms,
       is_suspended: user.is_suspended, is_active: user.is_active, created: user.createdAt,
+      online: hb.set.has(username), last_bound_at: user.last_bound_at || null, last_bound_ip: user.last_bound_ip || '',
       low_balance_threshold: user.low_balance_threshold,
       billing_mode: user.billing_mode || 'prepaid',
       credit_limit: user.credit_limit,

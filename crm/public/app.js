@@ -27,7 +27,7 @@ const METHODS=['bank','cash','crypto','usdt-trc20','other','manual'];
 const kindIc={note:'📝',call:'📞',meeting:'👥',email:'✉️',task:'✅',system:'⚙️'};
 
 const NAV=[
-  ['MAIN',[['dashboard','📊 Dashboard'],['clients','👥 Clients'],['mail','✉️ Mail'],['tickets','🎫 Tickets'],['traffic','📡 Traffic & DLR'],['leads','🎯 Leads'],['tasks','✅ Tasks']]],
+  ['MAIN',[['dashboard','📊 Dashboard'],['clients','👥 Clients'],['status','🟢 Online status'],['mail','✉️ Mail'],['tickets','🎫 Tickets'],['traffic','📡 Traffic & DLR'],['leads','🎯 Leads'],['tasks','✅ Tasks']]],
   ['MONEY',[['payments','💶 Payments'],['postpaid','📆 Postpaid'],['crypto','₮ Crypto top-ups'],['invoices','🧾 Invoices'],['statements','📅 Statements']]],
   ['SYSTEM',[['routestock','📦 Route stock'],['templates','🔤 Auto-templates'],['domains','🌐 Domains'],['settings','⚙️ Settings']]],
 ];
@@ -44,7 +44,7 @@ async function boot(){
   $('#nav').querySelectorAll('.nav-item').forEach(n=>n.onclick=()=>go(n.dataset.nav));
   go('dashboard');
 }
-function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',mail:'Mail',tickets:'Support tickets',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',postpaid:'Postpaid clients',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',routestock:'Route stock',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
+function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',status:'Online status',mail:'Mail',tickets:'Support tickets',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',postpaid:'Postpaid clients',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',routestock:'Route stock',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
 let CUR='dashboard',CUR_ARG=null;
 async function go(k,arg){CUR=k;CUR_ARG=arg;setActive(k);const v=$('#view');v.innerHTML='<p class="muted">Loading…</p>';try{await VIEWS[k](v,arg);}catch(e){v.innerHTML=`<p class="err">${esc(e.message)}</p>`;}}
 window.__go=go;
@@ -126,11 +126,44 @@ VIEWS.clients=async v=>{
       <td style="${c.credits<0?'color:#dc2626':''}">${c.credits<0?'-'+eur3(-c.credits):eur3(c.credits)}${c.billing_mode==='postpaid'?' <span class="badge purple" style="font-size:9px">postpaid</span>':''}</td><td>${eur3(c.cost_per_sms)}</td>
       <td><b>${eur(c.revenue)}</b><span class="muted" style="font-size:11px"> · ${c.payments}×</span></td>
       <td>${c.last_payment?fday(c.last_payment):'never'}</td>
-      <td>${c.is_suspended?'<span class="badge red">suspended</span>':'<span class="badge green">active</span>'}</td>
+      <td><span class="dot ${c.online?'on':'off'}" title="${c.online?'online — SMPP bound now':'offline'}"></span>${c.is_suspended?'<span class="badge red">suspended</span>':'<span class="badge green">active</span>'}</td>
       <td><button class="sm" onclick="window.__go('client','${esc(c.username)}')">Open</button></td></tr>`;}).join('')||'<tr><td colspan="10" class="muted">No matches.</td></tr>';};
   $('#c_new').onclick=()=>newClientModal(()=>go('clients'));
   $('#c_q').addEventListener('input',e=>render(e.target.value));
   render('');
+};
+
+// ============================ ONLINE STATUS ============================
+const ago=d=>{if(!d)return 'never';const s=Math.max(0,(Date.now()-new Date(d).getTime())/1000);if(s<60)return Math.round(s)+'s ago';if(s<3600)return Math.round(s/60)+'m ago';if(s<86400)return Math.round(s/3600)+'h ago';return Math.round(s/86400)+'d ago';};
+VIEWS.status=async v=>{
+  v.innerHTML=`<h2 class="title">Online status</h2><div id="st_box"><p class="muted">Loading…</p></div>`;
+  const draw=d=>{if(CUR!=='status')return;
+    const rows=[...d.clients].sort((a,b)=>(b.online-a.online)||(b.api_active-a.api_active)||a.username.localeCompare(b.username));
+    $('#st_box').innerHTML=`
+    ${d.bridge_up
+      ?`<div class="panel" style="padding:10px 16px;margin-bottom:14px"><span class="dot on"></span><b>SMPP engine running</b><span class="muted" style="font-size:12px"> · heartbeat ${ago(d.heartbeat_at)} · auto-refreshes every 10s</span></div>`
+      :`<div class="panel" style="padding:10px 16px;margin-bottom:14px;border:1px solid var(--red)"><span class="dot off"></span><b style="color:var(--red)">SMPP engine not responding</b><span class="muted" style="font-size:12px"> · last heartbeat ${ago(d.heartbeat_at)} — connection status unknown, all clients shown offline</span></div>`}
+    <div class="cards">
+      <div class="card"><div class="k">🟢 Online (SMPP bound)</div><div class="v">${d.online}</div></div>
+      <div class="card"><div class="k">🔵 Active via API (10 min)</div><div class="v">${d.api_active}</div></div>
+      <div class="card"><div class="k">⚪ Offline</div><div class="v">${d.offline}</div></div>
+      <div class="card"><div class="k">👥 Total clients</div><div class="v">${d.total}</div></div>
+    </div>
+    <div class="panel"><div class="table-wrap"><table><thead><tr><th></th><th>Client</th><th>Status</th><th>IP</th><th>Bind</th><th>Online since</th><th>Last SMPP bind</th><th>Last send</th></tr></thead><tbody>
+    ${rows.map(r=>`<tr>
+      <td><span class="dot ${r.online?'on':'off'}"></span></td>
+      <td><a onclick="window.__go('client','${esc(r.username)}')"><b>${esc(r.username)}</b></a></td>
+      <td>${r.online?'<span class="badge green">online</span>':r.api_active?'<span class="badge blue">API active</span>':'<span class="badge gray">offline</span>'}${r.is_suspended?' <span class="badge red">suspended</span>':''}</td>
+      <td class="mono" style="font-size:12px">${esc(r.ip||'—')}</td>
+      <td>${esc(r.bind_type||'—')}</td>
+      <td>${r.online&&r.bound_at?`${fdate(r.bound_at)} <span class="muted" style="font-size:11px">(${esc(ago(r.bound_at).replace(' ago',''))})</span>`:'—'}</td>
+      <td>${r.last_bound_at?fdate(r.last_bound_at):'never'}</td>
+      <td>${r.last_send?`${fdate(r.last_send)} <span class="muted" style="font-size:11px">${ago(r.last_send)}</span>`:'never'}</td>
+    </tr>`).join('')||'<tr><td colspan="8" class="muted">No clients yet.</td></tr>'}
+    </tbody></table></div></div>`;
+  };
+  draw(await api('/status/online'));
+  const t=setInterval(async()=>{if(CUR!=='status'){clearInterval(t);return;}try{draw(await api('/status/online'));}catch(_){}},10000);
 };
 
 // ---- client detail ----
@@ -139,7 +172,7 @@ VIEWS.client=async(v,username)=>{
   const p=d.profile||{};const u=d.user;
   const rname=id=>{const r=routes.find(x=>x.id===String(id));return r?r.name:null;};
   v.innerHTML=`<span class="back" onclick="window.__go('clients')">← All clients</span>
-  <h2 class="title">${esc(p.company||username)} <span class="muted" style="font-size:14px;font-weight:400">· ${esc(username)}</span> ${u.billing_mode==='postpaid'?'<span class="badge purple">📆 postpaid</span>':''} ${u.is_suspended?'<span class="badge red">suspended</span>':''}</h2>
+  <h2 class="title">${esc(p.company||username)} <span class="muted" style="font-size:14px;font-weight:400">· ${esc(username)}</span> ${u.online?'<span class="badge green">🟢 online</span>':`<span class="badge gray" title="last SMPP bind: ${u.last_bound_at?esc(fdate(u.last_bound_at)):'never'}">offline</span>`} ${u.billing_mode==='postpaid'?'<span class="badge purple">📆 postpaid</span>':''} ${u.is_suspended?'<span class="badge red">suspended</span>':''}</h2>
   <div class="cards">
     <div class="card"><div class="k">${u.billing_mode==='postpaid'&&u.credits<0?'Owes (postpaid)':'Balance'}</div><div class="v sm" style="${u.credits<0?'color:#dc2626':''}">${u.billing_mode==='postpaid'&&u.credits<0?eur3(-u.credits):eur3(u.credits)}</div>${u.billing_mode==='postpaid'?`<div class="muted" style="font-size:11px">pay day: ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][u.pay_day!=null?u.pay_day:1]}${u.credit_limit!=null?` · soft limit €${u.credit_limit}`:''}</div>`:''}</div>
     <div class="card"><div class="k">Price / SMS</div><div class="v sm">${eur3(u.cost_per_sms)}</div></div>

@@ -121,6 +121,7 @@ engine.setDlrDeliver((username, dlr) => {
 });
 
 // Poll DropCommand collection so admins can force-drop a bound session.
+// Also heartbeat the live bound-user list so the panels can tell online from stale.
 setInterval(async () => {
   try {
     const cmds = await db.DropCommand.find({});
@@ -130,10 +131,20 @@ setInterval(async () => {
       await db.DropCommand.deleteOne({ _id: c._id }).catch(() => {});
     }
   } catch (_) {}
+  try {
+    await db.Setting.updateOne(
+      { key: 'smpp_heartbeat' },
+      { $set: { value: { at: new Date(), online: [...bound.keys()] } } },
+      { upsert: true }
+    );
+  } catch (_) {}
 }, 5000);
 
 async function main() {
   await db.connect();
+  // A restart drops every bind — clear stale connected flags from a previous run/crash.
+  await db.User.updateMany({ is_connected: true }, { $set: { is_connected: false } }).catch(() => {});
+  await db.ActiveConnection.updateMany({ is_connected: true }, { $set: { is_connected: false } }).catch(() => {});
   const server = smpp.createServer({ debug: false }, handleSession);
   server.on('error', (e) => console.error('[smpp] server error', e.message));
   server.listen(SMPP_PORT, SMPP_HOST, () => console.log(`[smpp] SMSC listening on ${SMPP_HOST}:${SMPP_PORT}`));
