@@ -9,6 +9,7 @@
 // status code, otherwise a rejected message gets billed + marked accepted.
 // Configure the route with provides_dlr = FALSE (a good send -> 'accepted').
 const axios = require('axios');
+const outbound = require('../shared/outbound');
 const DEFAULT = 'https://sms.sociair.com/api/sms';
 
 async function send(route, dest, msg) {
@@ -16,13 +17,16 @@ async function send(route, dest, msg) {
     const res = await axios.post(
       route.api_url || DEFAULT,
       { message: msg, mobile: String(dest) },
-      { headers: {
+      outbound.cfg(route, { headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
           Authorization: 'Bearer ' + (route.auth_token || ''),
         },
-        timeout: 15000,
-        validateStatus: () => true });
+        // Sociair's server is frequently slow (~16–19s just to respond). A 15s
+        // timeout cut every send short → counted as failure → circuit breaker
+        // opened → "dispatch failed". Give it real headroom; tunable per-route.
+        timeout: route.timeout_ms || 40000,
+        validateStatus: () => true }));
 
     const data = res.data || {};
     const verdict = String(data.message || '');

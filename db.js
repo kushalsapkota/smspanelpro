@@ -30,6 +30,10 @@ const UserSchema = new Schema({
   // routing
   route_id: { type: Schema.Types.ObjectId, ref: 'Route', default: null },
   backup_route_id: { type: Schema.Types.ObjectId, ref: 'Route', default: null },
+  // load-balanced route set: when non-empty, live traffic is split EVENLY (round-robin) across
+  // these routes — one is chosen to lead each message and the others follow as failover for that
+  // message. Overrides the single route_id/backup_route_id ordering. Empty = legacy primary->backup.
+  balance_route_ids: { type: [{ type: Schema.Types.ObjectId, ref: 'Route' }], default: [] },
 
   // limits / status
   max_mps: { type: Number, default: 10 },
@@ -295,6 +299,25 @@ const ApiKeySchema = new Schema({
   last_used_at: { type: Date, default: null },
 }, { timestamps: true });
 
+// Provider API-key pool (e.g. INSOFT: 100 accounts, each its own token/sender/host + credit
+// balance). The adapter rotates across these and tracks each key's remaining credit; when one
+// runs dry it flips to 'exhausted' and the next key (highest remaining) takes over.
+const ProviderKeySchema = new Schema({
+  route_id: { type: Schema.Types.ObjectId, ref: 'Route', required: true, index: true },
+  label: { type: String, default: '' },            // optional human name
+  token: { type: String, required: true },         // the provider API key (web-panel pool: the login username)
+  password: { type: String, default: '' },         // web-panel accounts only: login password (api keys leave blank)
+  sender_id: { type: String, default: '' },        // per-key approved Sender ID (blank => route's)
+  host: { type: String, default: '' },             // per-key base host/url (blank => route's)
+  credit_initial: { type: Number, default: 0 },    // seeded balance (provider units, e.g. rupees)
+  credit_remaining: { type: Number, default: 0 },  // decremented per send by balance_deducted
+  sms_sent: { type: Number, default: 0 },          // segments sent on this key
+  status: { type: String, enum: ['active', 'exhausted', 'disabled'], default: 'active', index: true },
+  last_used_at: { type: Date, default: null },
+  last_error: { type: String, default: '' },
+}, { timestamps: true });
+ProviderKeySchema.index({ route_id: 1, status: 1, credit_remaining: -1 });
+
 // ----------------------------------------------------------------------------
 // Model registration (real Mongoose, or in-memory mock)
 // ----------------------------------------------------------------------------
@@ -306,6 +329,7 @@ const defs = {
   WebhookLog: WebhookLogSchema, DropCommand: DropCommandSchema,
   Invoice: InvoiceSchema, Payment: PaymentSchema,
   UsageEvent: UsageEventSchema, ApiKey: ApiKeySchema, RouteTopup: RouteTopupSchema,
+  ProviderKey: ProviderKeySchema,
 };
 
 let models = {};

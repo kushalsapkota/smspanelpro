@@ -85,7 +85,7 @@ async function maybeRouteStockAlert(routeId, remaining) {
 // ---- in-memory trackers ----
 const recent = new Map();       // dedup key -> ts
 const mps = new Map();          // username -> { sec, count }
-const rrIndex = new Map();      // username -> round-robin template index
+const rrIndex = new Map();      // username -> round-robin offset for balance_route_ids
 const DEDUP_MS = 3000;
 
 function dedupHit(username, dest, text) {
@@ -198,6 +198,19 @@ async function pickRoutes(user, dest) {
   const rules = await db.RoutingRule.find({ is_active: true });
   const matched = (rules || []).filter((r) => String(dest).startsWith(r.prefix)).sort((a, b) => b.prefix.length - a.prefix.length || (b.priority - a.priority));
   for (const m of matched) push(await db.Route.findById(m.route_id));
+
+  // Load-balanced set: rotate which route LEADS this message (even round-robin per user), then
+  // append the rest so a failed/circuit-open pick fails over across the whole trio. Spreads a
+  // bursty stream evenly — at 15/s across 3 routes each provider sees only ~5/s.
+  const balIds = (user.balance_route_ids || []).map(String);
+  if (balIds.length) {
+    const n = balIds.length;
+    const start = (rrIndex.get(user.username) || 0) % n;
+    rrIndex.set(user.username, (start + 1) % n);
+    const byId = new Map();
+    for (const r of await db.Route.find({ _id: { $in: balIds } })) byId.set(String(r._id), r);
+    for (let i = 0; i < n; i++) push(byId.get(balIds[(start + i) % n]));
+  }
 
   if (user.route_id) push(await db.Route.findById(user.route_id));
   if (user.backup_route_id) push(await db.Route.findById(user.backup_route_id));

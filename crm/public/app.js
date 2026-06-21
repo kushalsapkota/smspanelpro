@@ -29,7 +29,7 @@ const kindIc={note:'📝',call:'📞',meeting:'👥',email:'✉️',task:'✅',s
 const NAV=[
   ['MAIN',[['dashboard','📊 Dashboard'],['clients','👥 Clients'],['status','🟢 Online status'],['mail','✉️ Mail'],['tickets','🎫 Tickets'],['traffic','📡 Traffic & DLR'],['leads','🎯 Leads'],['tasks','✅ Tasks']]],
   ['MONEY',[['payments','💶 Payments'],['postpaid','📆 Postpaid'],['crypto','₮ Crypto top-ups'],['invoices','🧾 Invoices'],['statements','📅 Statements']]],
-  ['SYSTEM',[['routestock','📦 Route stock'],['templates','🔤 Auto-templates'],['domains','🌐 Domains'],['settings','⚙️ Settings']]],
+  ['SYSTEM',[['routes','📡 Routes'],['routestock','📦 Route stock'],['outboundips','🌐 Outbound IPs'],['templates','🔤 Auto-templates'],['domains','🌐 Domains'],['settings','⚙️ Settings']]],
 ];
 const routeOpts=(routes,sel)=>`<option value="">— no route (can't send) —</option>`+routes.map(r=>`<option value="${r.id}" ${String(sel)===r.id?'selected':''}>${esc(r.name)} (${esc(r.type)})${r.is_active?'':' [inactive]'}</option>`).join('');
 
@@ -44,7 +44,7 @@ async function boot(){
   $('#nav').querySelectorAll('.nav-item').forEach(n=>n.onclick=()=>go(n.dataset.nav));
   go('dashboard');
 }
-function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',status:'Online status',mail:'Mail',tickets:'Support tickets',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',postpaid:'Postpaid clients',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',routestock:'Route stock',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
+function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',status:'Online status',mail:'Mail',tickets:'Support tickets',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',postpaid:'Postpaid clients',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',routes:'SMS Routes',routestock:'Route stock',outboundips:'Outbound IPs',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
 let CUR='dashboard',CUR_ARG=null;
 async function go(k,arg){CUR=k;CUR_ARG=arg;setActive(k);const v=$('#view');v.innerHTML='<p class="muted">Loading…</p>';try{await VIEWS[k](v,arg);}catch(e){v.innerHTML=`<p class="err">${esc(e.message)}</p>`;}}
 window.__go=go;
@@ -357,7 +357,7 @@ function payModal(username,reload,preset){
   <div class="field"><label>Method</label><select id="m_meth">${METHODS.filter(m=>m!=='usdt-trc20').map(m=>`<option>${m}</option>`).join('')}</select></div></div>
   <div class="field"><label>Reference (bank ref / txid / receipt #)</label><input id="m_ref"/></div>
   <div class="field"><label>Note</label><input id="m_note"/></div>
-  <label class="switch"><input type="checkbox" id="m_credit" checked/> Top up client balance with this amount</label><br/>
+  <label class="switch"><input type="checkbox" id="m_credit" checked/> Add to client balance — tops up prepaid / settles postpaid debt <span class="muted" style="font-size:11px">(always applied for postpaid)</span></label><br/>
   <label class="switch" style="margin-top:8px"><input type="checkbox" id="m_rcpt" checked/> Generate numbered receipt (PDF)</label>
   <div class="err" id="m_err"></div><div class="actions"><button data-x>Cancel</button><button class="primary" id="m_save">Record</button></div>`,
   (b,c)=>{b.querySelector('[data-x]').onclick=c;
@@ -411,6 +411,197 @@ VIEWS.postpaid=async v=>{
 };
 
 // ============================ ROUTE STOCK ============================
+VIEWS.routes=async v=>{
+  const routes=await api('/routes');
+  v.innerHTML=`<h2 class="title">SMS Routes <button id="nr" class="primary" style="float:right">+ New route</button></h2>
+  <p class="muted" style="font-size:12px">Provider connections that actually send the SMS. Assign one to a client in their 📡 Account / route panel.</p>
+  <div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Endpoint</th><th>€/SMS</th><th>DLR</th><th>Clients</th><th>Status</th><th></th></tr></thead><tbody>
+  ${routes.map(r=>`<tr>
+    <td><b>${esc(r.name)}</b></td><td><span class="badge blue">${esc(r.type)}</span></td>
+    <td class="mono" style="font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.api_url||(r.smpp_host?r.smpp_host+':'+r.smpp_port:'—'))}</td>
+    <td>${eur3(r.cost_per_sms||0)}</td>
+    <td>${r.provides_dlr?'<span class="badge green">real</span>':'<span class="badge">accepted</span>'}</td>
+    <td>${r.clients||0}</td>
+    <td>${r.is_active?'<span class="badge green">active</span>':'<span class="badge red">off</span>'}</td>
+    <td style="white-space:nowrap">${['insoft','insoftsms','insoft2','insoftsms2','insoftpanel','insoftweb'].includes(r.type)?`<button data-keys="${r.id}" data-n="${esc(r.name)}">🔑 Keys</button> `:''}<button data-test="${r.id}">🔌 Test</button> <button data-edit="${r.id}">✏️</button> <button data-del="${r.id}" data-n="${esc(r.name)}" data-c="${r.clients||0}">🗑</button></td>
+  </tr>`).join('')||'<tr><td colspan="8" class="muted">No routes yet — click “+ New route”.</td></tr>'}
+  </tbody></table></div>`;
+  $('#nr',v).onclick=()=>routeModal();
+  v.querySelectorAll('[data-keys]').forEach(b=>b.onclick=()=>keysModal(b.dataset.keys,b.dataset.n));
+  v.querySelectorAll('[data-edit]').forEach(b=>b.onclick=async()=>{try{routeModal(await api('/routes/'+b.dataset.edit));}catch(e){toast(e.message,true);}});
+  v.querySelectorAll('[data-test]').forEach(b=>b.onclick=async()=>{b.disabled=true;const o=b.textContent;b.textContent='…';try{const r=await api('/routes/'+b.dataset.test+'/test',{method:'POST'});toast((r.ok?'✓ ':'✗ ')+r.message,!r.ok);}catch(e){toast('✗ '+e.message,true);}b.disabled=false;b.textContent=o;});
+  v.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(Number(b.dataset.c)>0){toast('Assigned to '+b.dataset.c+' client(s) — reassign first',true);return;}if(!confirm('Delete route “'+b.dataset.n+'”?'))return;try{await api('/routes/'+b.dataset.del,{method:'DELETE'});toast('Deleted');go('routes');}catch(e){toast(e.message,true);}});
+};
+
+// Provider-type-aware credential fields (prefilled from the route on edit).
+function routeCredFields(type,r){r=r||{};let creds={};try{if(r.auth_token)creds=JSON.parse(r.auth_token);}catch(_){}
+  if(type==='sparrow')return `<div class="field"><label>Sparrow API token</label><input id="r_tok" value="${esc(r.auth_token||'')}" placeholder="v2_..."/></div>
+    <p class="muted" style="font-size:11px">Set the <b>Sender ID</b> below to your approved identity (e.g. Ultranet). ⚠️ Sparrow IP-whitelists the token — this server's public IP must be allow-listed on the Sparrow account, or every send is “Invalid IP”.</p>`;
+  if(type==='insoft'||type==='insoftsms')return `<div class="field"><label>INSOFT API key (token)</label><input id="r_tok" value="${esc(r.auth_token||'')}" placeholder="EB069C1D-CF99-4B0D-8A25-0A2E3274CBC6"/></div>
+    <div class="row"><div class="field"><label>Base URL <span class="muted">(your-initial.insoftsms.com)</span></label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="https://sms.insoftsms.com"/></div>
+    <div class="field"><label>HTTP method</label><select id="r_method"><option ${r.http_method!=='GET'?'selected':''}>POST</option><option ${r.http_method==='GET'?'selected':''}>GET</option></select></div></div>
+    <p class="muted" style="font-size:11px">Set the <b>Sender ID</b> below to your approved INSOFT identity (e.g. <b>insoft</b>). Add multiple accounts via <b>🔑 Keys</b> on the routes list. No DLR API → sends show <b>accepted</b> (flip “real DLRs” ON for optimistic delivered).</p>`;
+  if(type==='insoft2'||type==='insoftsms2')return `<div class="field"><label>API token</label><input id="r_tok" value="${esc(r.auth_token||'')}" placeholder="token from the panel → API & Docs"/></div>
+    <div class="row"><div class="field"><label>Panel base URL <span class="muted">(the real host you log into)</span></label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="https://your-panel-host"/></div>
+    <div class="field"><label>HTTP method</label><select id="r_method"><option ${r.http_method!=='POST'?'selected':''}>GET</option><option ${r.http_method==='POST'?'selected':''}>POST</option></select></div></div>
+    <p class="muted" style="font-size:11px">Insoft “web SMS Server” variant (fields <b>to</b>/<b>sender</b>, path <b>/api/sendsms</b>, has a real <b>/credit/</b> balance check). Set the <b>Sender ID</b> below. Add multiple accounts via <b>🔑 Keys</b>. The doc host <i>sms.inschoolerp.com</i> is only a sample — use your account's real host.</p>`;
+  if(type==='insoftpanel'||type==='insoftweb')return `<div class="row"><div class="field"><label>Panel username</label><input id="r_user" value="${esc(creds.username||'')}"/></div>
+    <div class="field"><label>Panel password</label><input id="r_pass" type="password" value="${esc(creds.password||'')}"/></div></div>
+    <div class="field"><label>Panel base URL</label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="https://insoftsms.com"/></div>
+    <p class="muted" style="font-size:11px">Insoft <b>web panel</b> (cookie login → /BulkSms/Save) — for accounts WITHOUT an API token. Set the <b>Sender ID</b> below (e.g. puspanjali). Logs in & sends as the browser does.</p>`;
+  if(type==='spellcpaas'||type==='routegod'||type==='spell'){const sc=(r.config||{});return `<div class="field"><label>Spell CPaaS API key</label><input id="r_tok" value="${esc(r.auth_token||'')}" placeholder="e.g. F72D390350C4179B855E6B197FC124C1"/></div>
+    <div class="row"><div class="field"><label>Campaign ID <span class="muted">(optional)</span></label><input id="r_campaign" value="${esc(sc.campaign||'')}"/></div>
+    <div class="field"><label>Route ID <span class="muted">(optional)</span></label><input id="r_routeid" value="${esc(sc.routeid||'')}"/></div></div>
+    <div class="field"><label>Base URL <span class="muted">(blank = default)</span></label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="https://spellcpaas.com"/></div>
+    <p class="muted" style="font-size:11px">Spell CPaaS HTTP API (<b>spellcpaas.com</b>). Key goes in the API key field; campaign &amp; route id are account-specific. This provider HAS a real <b>getDLR</b> endpoint → you can turn ON delivery receipts below. Use <b>Test</b> to verify the key.</p>`;}
+  if(type==='webzonesms')return `<div class="field"><label>Webzone API token</label><input id="r_tok" value="${esc(r.auth_token||'')}" placeholder="token from sms.webzonesms.com → Developers"/></div>
+    <div class="field"><label>Send URL <span class="muted">(blank = default)</span></label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="http://sms.webzonesms.com/api/v3/sms"/></div>
+    <p class="muted" style="font-size:11px">“Ultimate SMS” panel. Token goes in the <b>token</b> field (not Bearer). Set the <b>Sender ID</b> below to your approved identity. No DLR API → sends show <b>accepted</b>. Use <b>Test</b> to verify the account isn't expired / out of credit.</p>`;
+  if(type==='hms')return `<div class="row"><div class="field"><label>Panel username</label><input id="r_user" value="${esc(creds.username||'')}"/></div>
+    <div class="field"><label>Panel password</label><input id="r_pass" type="password" value="${esc(creds.password||'')}"/></div></div>
+    <div class="field"><label>Send URL <span class="muted">(blank = default)</span></label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="…/operation.php?module=sms&page=individual_sms_operation"/></div>`;
+  if(type==='quickconnect')return `<div class="row"><div class="field"><label>API token</label><input id="qc_api" value="${esc(creds.apiToken||'')}"/></div>
+    <div class="field"><label>Login mobile / email</label><input id="qc_id" value="${esc(creds.mobile||creds.email||'')}"/></div></div>
+    <div class="row"><div class="field"><label>Login password</label><input id="qc_pass" type="password" value="${esc(creds.password||'')}"/></div>
+    <div class="field"><label>Messaging URL <span class="muted">(blank=default)</span></label><input id="r_url" value="${esc(r.api_url||'')}"/></div></div>`;
+  if(type==='smpp')return `<div class="row"><div class="field"><label>SMPP host</label><input id="sm_h" value="${esc(r.smpp_host||'')}"/></div><div class="field"><label>Port</label><input id="sm_p" type="number" value="${r.smpp_port||2775}"/></div></div>
+    <div class="row"><div class="field"><label>System ID</label><input id="sm_s" value="${esc(r.smpp_system_id||'')}"/></div><div class="field"><label>Password</label><input id="sm_pw" type="password" value="${esc(r.smpp_password||'')}"/></div></div>`;
+  return `<div class="field"><label>API URL</label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="https://api.provider.com/send"/></div>
+    <div class="row"><div class="field"><label>Auth token / API key</label><textarea id="r_tok" rows="2">${esc(r.auth_token||'')}</textarea></div>
+    <div class="field"><label>HTTP method</label><select id="r_method"><option ${r.http_method!=='GET'?'selected':''}>POST</option><option ${r.http_method==='GET'?'selected':''}>GET</option></select></div></div>`;}
+
+function routeModal(r){r=r||{};const types=['sparrow','hms','insoft','insoft2','insoftpanel','quickconnect','sociair','aakash','webzonesms','spellcpaas','routegod','spell','smpp','custom','globalzms','nestsms','nestpanel','nepal2rs','insoftsms','insoftsms2','insoftweb','arcbridge'];
+  modal((r.id?'Edit':'New')+' route',`
+  <div class="row"><div class="field"><label>Name</label><input id="r_name" value="${esc(r.name||'')}"/></div>
+  <div class="field"><label>Provider type</label><select id="r_type">${types.map(t=>`<option ${r.type===t?'selected':''}>${t}</option>`).join('')}</select></div></div>
+  <div id="r_creds"></div>
+  <div class="row"><div class="field"><label>Sender ID <span class="muted">(if supported)</span></label><input id="r_sender" value="${esc(r.sender_id||'')}"/></div>
+  <div class="field"><label>Cost €/SMS</label><input id="r_cost" type="number" step="0.001" value="${r.cost_per_sms!=null?r.cost_per_sms:0}"/></div></div>
+  <label class="switch"><input type="checkbox" id="r_dlr" ${r.provides_dlr?'checked':''}/> Provider returns REAL delivery receipts (DLRs)</label>
+  <p class="muted" style="font-size:11px">Leave OFF for accept-only providers — they show <b>accepted</b>, never a fake <b>delivered</b>.</p>
+  <label class="switch" style="margin-top:6px"><input type="checkbox" id="r_active" ${r.is_active!==false?'checked':''}/> Active</label>
+  <div class="field" style="margin-top:8px"><label>Source IPs <span class="muted">(comma-separated; blank = use the global pool / server default)</span></label>
+    <input id="r_sips" value="${esc((r.config&&Array.isArray(r.config.source_ips))?r.config.source_ips.join(', '):'')}" placeholder="e.g. 161.97.175.111  — pin a whitelisted provider (Sparrow) to its IP"/></div>
+  <details style="margin-top:8px"><summary class="muted" style="font-size:12px;cursor:pointer">Advanced config (JSON)</summary>
+    <textarea id="r_cfg" rows="3" placeholder='{ "key": "value" }'>${r.config&&Object.keys(r.config).length?esc(JSON.stringify(r.config,null,1)):''}</textarea></details>
+  <div class="err" id="r_err"></div><div class="actions"><button data-x>Cancel</button><button class="primary" id="r_save">Save</button></div>`,
+  (b,c)=>{b.querySelector('[data-x]').onclick=c;
+    const tsel=$('#r_type',b);const paint=()=>{$('#r_creds',b).innerHTML=routeCredFields(tsel.value,r);};tsel.onchange=paint;paint();
+    $('#r_save',b).onclick=async()=>{try{
+      const type=tsel.value;const body={name:$('#r_name',b).value,type,sender_id:$('#r_sender',b).value,cost_per_sms:Number($('#r_cost',b).value)||0,provides_dlr:$('#r_dlr',b).checked,is_active:$('#r_active',b).checked};
+      const cfgRaw=$('#r_cfg',b).value.trim();if(cfgRaw)body.config=JSON.parse(cfgRaw);
+      const sipEl=$('#r_sips',b);if(sipEl){const arr=sipEl.value.split(/[,\s]+/).map(s=>s.trim()).filter(Boolean);body.config=Object.assign({},body.config);if(arr.length)body.config.source_ips=arr;else delete body.config.source_ips;}
+      const urlEl=$('#r_url',b);if(urlEl)body.api_url=urlEl.value;
+      if(type==='hms'||type==='insoftpanel'||type==='insoftweb'){const u=$('#r_user',b).value;if(!u)throw new Error('username required');body.auth_token=JSON.stringify({username:u,password:$('#r_pass',b).value});}
+      else if(type==='quickconnect'){const id=$('#qc_id',b).value,a={apiToken:$('#qc_api',b).value,password:$('#qc_pass',b).value};if(/@/.test(id))a.email=id;else a.mobile=id;body.auth_token=JSON.stringify(a);}
+      else if(type==='smpp'){body.smpp_host=$('#sm_h',b).value;body.smpp_port=Number($('#sm_p',b).value)||2775;body.smpp_system_id=$('#sm_s',b).value;const pw=$('#sm_pw',b).value;if(pw)body.smpp_password=pw;}
+      else{const tok=$('#r_tok',b);if(tok)body.auth_token=tok.value;const m=$('#r_method',b);if(m)body.http_method=m.value;}
+      if(type==='spellcpaas'||type==='routegod'||type==='spell'){body.config=Object.assign({},body.config);const ca=$('#r_campaign',b),ro=$('#r_routeid',b);if(ca&&ca.value.trim())body.config.campaign=ca.value.trim();else delete body.config.campaign;if(ro&&ro.value.trim())body.config.routeid=ro.value.trim();else delete body.config.routeid;}
+      if(r.id)await api('/routes/'+r.id,{method:'PATCH',body});else await api('/routes',{method:'POST',body});
+      c();toast('Route saved');go('routes');
+    }catch(e){$('#r_err',b).textContent=e.message;}};});}
+
+// INSOFT key-pool manager: many accounts, round-robin load-spread + auto-failover. For web-panel
+// routes (insoftpanel) a "key" is a login account (username+password), not an API token.
+function keysModal(routeId,routeName){
+  const cr=n=>Number(n||0).toLocaleString(undefined,{maximumFractionDigits:3});
+  const sbadge=s=>s==='active'?'<span class="badge green">active</span>':s==='exhausted'?'<span class="badge red">exhausted</span>':'<span class="badge gray">disabled</span>';
+  modal('🔑 Key pool — '+routeName,`<div id="kp">Loading…</div>`,(b,close)=>{
+    const root=$('#kp',b); let panel=false;
+    async function load(){try{const d=await api('/routes/'+routeId+'/keys');panel=['insoftpanel','insoftweb'].includes((d.route&&d.route.type)||'');render(d);}catch(e){root.innerHTML='<p class="err">'+esc(e.message)+'</p>';}}
+    function render(d){
+      const s=d;
+      root.innerHTML=`
+      <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin-bottom:10px">
+        <div class="card"><div class="k">Keys</div><div style="font-size:20px;font-weight:700">${s.total}</div><div class="muted" style="font-size:11px">${s.active} active · ${s.exhausted} dry · ${s.disabled} off</div></div>
+        <div class="card"><div class="k">Credit left</div><div style="font-size:20px;font-weight:700">${cr(s.credit_remaining)}</div><div class="muted" style="font-size:11px">of ${cr(s.credit_initial)} seeded</div></div>
+        <div class="card"><div class="k">SMS sent</div><div style="font-size:20px;font-weight:700">${n2(s.sms_sent)}</div></div>
+        <div class="card"><div class="k">Next key</div><div style="font-size:13px;font-weight:700">${s.next_key?esc(s.next_key.label):'<span class="muted">none</span>'}</div><div class="muted" style="font-size:11px">${s.next_key?cr(s.next_key.credit_remaining)+' left':'pool empty/dry'}</div></div>
+      </div>
+      <details style="margin-bottom:10px"><summary class="muted" style="cursor:pointer;font-size:12px">⬆️ Bulk import — paste one ${panel?'account':'key'} per line</summary>
+        <p class="muted" style="font-size:11px;margin:6px 0">Format: <b>${panel?'username,password,senderid,host':'token,credit,senderid,host'}</b> — ${panel?'senderid/host':'credit/senderid/host'} optional (blank ⇒ route default). Separators: comma, tab or pipe.</p>
+        <textarea id="kp_imp" rows="5" placeholder="${panel?'puspanjali,public117,puspanjali,insoftsms.com&#10;acct2,pass2,sender2,insoftsms.com':'EB069C1D-...,50000,insoft,sms.insoftsms.com&#10;AB12...,1000,myinitial,myinitial.insoftsms.com'}"></textarea>
+        <button class="primary" id="kp_impb" style="margin-top:6px">Import ${panel?'accounts':'keys'}</button></details>
+      <details style="margin-bottom:10px"><summary class="muted" style="cursor:pointer;font-size:12px">➕ Add one ${panel?'account':'key'}</summary>
+        <div class="row" style="margin-top:6px"><div class="field"><label>${panel?'Username':'Token'}</label><input id="ka_tok"/></div><div class="field"><label>${panel?'Password':'Credit'}</label><input id="ka_cr" type="${panel?'text':'number'}" step="0.001"/></div></div>
+        <div class="row"><div class="field"><label>Sender ID <span class="muted">(blank=route)</span></label><input id="ka_snd"/></div><div class="field"><label>Host <span class="muted">(blank=route)</span></label><input id="ka_host" placeholder="sms.insoftsms.com"/></div></div>
+        <button class="primary" id="ka_add">Add ${panel?'account':'key'}</button></details>
+      <div class="table-wrap"><table><thead><tr><th>Key</th><th>Sender</th><th>Host</th><th>Remaining</th><th>Sent</th><th>Status</th><th></th></tr></thead><tbody>
+      ${s.keys.map(k=>{const pct=k.credit_initial>0?Math.max(0,Math.min(100,k.credit_remaining/k.credit_initial*100)):(k.credit_remaining>0?100:0);
+        const col=pct<=10?'#dc2626':pct<=30?'#d97706':'#16a34a';
+        return `<tr>
+        <td><b>${esc(k.label||k.token_mask)}</b><div class="mono muted" style="font-size:10px">${esc(k.token_mask)}</div>${k.last_error?`<div class="muted" style="font-size:10px;color:#dc2626">${esc(k.last_error).slice(0,40)}</div>`:''}</td>
+        <td>${esc(k.sender_id||'—')}</td>
+        <td class="mono" style="font-size:10px">${esc(k.host||'—')}</td>
+        <td style="min-width:110px"><div style="background:#e5e7eb;border-radius:5px;height:7px;overflow:hidden"><div style="width:${pct}%;height:100%;background:${col}"></div></div>
+          <div style="font-size:11px;margin-top:2px"><b>${cr(k.credit_remaining)}</b> <span class="muted">/ ${cr(k.credit_initial)}</span></div></td>
+        <td>${n2(k.sms_sent)}</td>
+        <td>${sbadge(k.status)}</td>
+        <td style="white-space:nowrap">
+          <button class="sm" data-tu="${k.id}" title="Top up">💰</button>
+          <button class="sm" data-ed="${k.id}" data-cr="${k.credit_remaining}" title="Set credit">✏️</button>
+          <button class="sm" data-tg="${k.id}" data-st="${k.status}" title="${k.status==='disabled'?'Enable':'Disable'}">${k.status==='disabled'?'▶️':'⏸'}</button>
+          <button class="sm" data-rm="${k.id}" title="Delete">🗑</button>
+        </td></tr>`;}).join('')||'<tr><td colspan="7" class="muted">No keys yet — bulk-import your INSOFT accounts above.</td></tr>'}
+      </tbody></table></div>`;
+      // wire
+      $('#kp_impb',root).onclick=async e=>{const t=$('#kp_imp',root).value.trim();if(!t)return;e.target.disabled=true;try{const r=await api('/routes/'+routeId+'/keys/import',{method:'POST',body:{text:t}});toast(`Imported ${r.added}${r.duplicates?', '+r.duplicates+' dup skipped':''}${r.errors.length?', '+r.errors.length+' errors':''}`,r.errors.length>0);render(r.summary);}catch(err){toast(err.message,true);e.target.disabled=false;}};
+      $('#ka_add',root).onclick=async()=>{const tok=$('#ka_tok',root).value.trim();if(!tok){toast(panel?'username required':'token required',true);return;}const body={token:tok,sender_id:$('#ka_snd',root).value.trim(),host:$('#ka_host',root).value.trim()};if(panel){const pw=$('#ka_cr',root).value;if(!pw){toast('password required',true);return;}body.password=pw;}else{body.credit=Number($('#ka_cr',root).value)||0;}try{const r=await api('/routes/'+routeId+'/keys',{method:'POST',body});toast(panel?'Account added':'Key added');render(r.summary);}catch(err){toast(err.message,true);}};
+      root.querySelectorAll('[data-tu]').forEach(x=>x.onclick=async()=>{const a=prompt('Top-up amount to add to this key (provider credit):');if(a==null)return;const amt=Number(a);if(!amt){toast('bad amount',true);return;}try{const r=await api('/keys/'+x.dataset.tu+'/topup',{method:'POST',body:{amount:amt}});toast('Topped up → '+cr(r.credit_remaining));render(r.summary);}catch(err){toast(err.message,true);}});
+      root.querySelectorAll('[data-ed]').forEach(x=>x.onclick=async()=>{const a=prompt('Set REMAINING credit for this key:',x.dataset.cr);if(a==null)return;const v=Number(a);if(!isFinite(v)){toast('bad number',true);return;}try{const r=await api('/keys/'+x.dataset.ed,{method:'PATCH',body:{credit_remaining:v}});render(r.summary);toast('Updated');}catch(err){toast(err.message,true);}});
+      root.querySelectorAll('[data-tg]').forEach(x=>x.onclick=async()=>{const ns=x.dataset.st==='disabled'?'active':'disabled';try{const r=await api('/keys/'+x.dataset.tg,{method:'PATCH',body:{status:ns}});render(r.summary);toast(ns==='active'?'Enabled':'Disabled');}catch(err){toast(err.message,true);}});
+      root.querySelectorAll('[data-rm]').forEach(x=>x.onclick=async()=>{if(!confirm('Delete this key from the pool?'))return;try{const r=await api('/keys/'+x.dataset.rm,{method:'DELETE'});render(r.summary);toast('Deleted');}catch(err){toast(err.message,true);}});
+    }
+    load();
+  });
+}
+
+// Outbound source-IP pool: send SMS from many VPS IPs; blocked IPs auto-skip, others keep sending.
+VIEWS.outboundips=async v=>{
+  const d=await api('/outbound-ips');
+  let ips=d.ips.map(x=>({ip:x.ip,label:x.label||'',disabled:!!x.disabled}));
+  let mode=d.mode||'rotate';
+  const onBox=new Set(d.server_ips.map(s=>s.ip));
+  const health={}; d.ips.forEach(x=>health[x.ip]={suspended:x.suspended,sent:x.sent,lastError:x.lastError,on_box:x.on_box});
+  const dur=ms=>!ms?'':Math.ceil(ms/60000)+'m';
+  function render(){
+    v.innerHTML=`<h2 class="title">Outbound IPs <button id="save" class="primary" style="float:right">💾 Save pool</button></h2>
+    <p class="muted" style="font-size:12px;margin-top:-6px">Every SMS goes out bound to one of these source IPs. If a provider blocks an IP, the others keep sending — a blocked IP (403/refused/"invalid IP") auto-pauses for 5 min, then retries. Add the IPs to your VPS network interface first, then list them here and <b>Test</b> each.</p>
+    <div class="panel"><h3>Rotation</h3>
+      <label class="switch"><input type="radio" name="mode" value="rotate" ${mode!=='sticky'?'checked':''}/> Spread (round-robin every send — balances load, hardest to block)</label><br/>
+      <label class="switch"><input type="radio" name="mode" value="sticky" ${mode==='sticky'?'checked':''}/> Sticky (use one IP until it gets blocked, then move to the next)</label>
+    </div>
+    ${d.server_ips.length?`<p class="muted" style="font-size:12px">Detected on this VPS: ${d.server_ips.map(s=>`<button class="sm" data-add="${s.ip}">+ ${esc(s.ip)}</button>`).join(' ')}</p>`:''}
+    <div class="table-wrap"><table><thead><tr><th>Source IP</th><th>Label</th><th>On box</th><th>State</th><th>Sent</th><th>Enabled</th><th></th></tr></thead><tbody id="iptb">
+    ${ips.map((x,i)=>{const hh=health[x.ip]||{};return `<tr>
+      <td class="mono"><b>${esc(x.ip)}</b>${hh.lastError?`<div class="muted" style="font-size:10px;color:#dc2626">${esc(hh.lastError).slice(0,38)}</div>`:''}</td>
+      <td><input data-lab="${i}" value="${esc(x.label)}" placeholder="e.g. extra-1" style="width:120px"/></td>
+      <td>${onBox.has(x.ip)?'<span class="badge green">yes</span>':'<span class="badge red">missing</span>'}</td>
+      <td>${x.disabled?'<span class="badge gray">off</span>':hh.suspended?'<span class="badge red">blocked</span>':'<span class="badge green">ready</span>'}</td>
+      <td>${n2(hh.sent||0)}</td>
+      <td style="text-align:center"><input type="checkbox" data-en="${i}" ${x.disabled?'':'checked'}/></td>
+      <td style="white-space:nowrap"><button class="sm" data-test="${x.ip}" title="Egress test">🛰️ Test</button> <button class="sm" data-rm="${i}" title="Remove">🗑</button></td>
+    </tr>`;}).join('')||'<tr><td colspan="7" class="muted">No IPs yet — add the VPS IPs you want to send from.</td></tr>'}
+    </tbody></table></div>
+    <div class="row" style="margin-top:8px;align-items:flex-end">
+      <div class="field"><label>Add IP</label><input id="newip" placeholder="161.97.175.111"/></div>
+      <div class="field"><label>Label</label><input id="newlab" placeholder="optional"/></div>
+      <button id="addip">+ Add</button>
+    </div>
+    <p class="muted" style="font-size:11px">Pin a route to specific IPs (e.g. Sparrow's whitelisted IP) via the route's <b>Source IPs</b> field. Empty pool = send from the server's default IP (unchanged).</p>`;
+    // wire
+    v.querySelectorAll('[name=mode]').forEach(r=>r.onchange=()=>{mode=v.querySelector('[name=mode]:checked').value;});
+    v.querySelectorAll('[data-lab]').forEach(inp=>inp.oninput=()=>{ips[+inp.dataset.lab].label=inp.value;});
+    v.querySelectorAll('[data-en]').forEach(c=>c.onchange=()=>{ips[+c.dataset.en].disabled=!c.checked;});
+    v.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{ips.splice(+b.dataset.rm,1);render();});
+    v.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>{if(!ips.find(z=>z.ip===b.dataset.add)){ips.push({ip:b.dataset.add,label:'',disabled:false});render();}});
+    $('#addip',v).onclick=()=>{const ip=$('#newip',v).value.trim();if(!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)){toast('enter a valid IPv4',true);return;}if(ips.find(z=>z.ip===ip)){toast('already listed',true);return;}ips.push({ip,label:$('#newlab',v).value.trim(),disabled:false});render();};
+    v.querySelectorAll('[data-test]').forEach(b=>b.onclick=async()=>{const o=b.textContent;b.disabled=true;b.textContent='…';try{const r=await api('/outbound-ips/test',{method:'POST',body:{ip:b.dataset.test}});if(r.ok)toast(r.match?`✓ ${b.dataset.test} → egress ${r.egress} (match)`:`⚠️ ${b.dataset.test} → egress ${r.egress} (NAT/shared)`,!r.match);else toast('✗ '+r.error,true);}catch(e){toast(e.message,true);}b.disabled=false;b.textContent=o;});
+    $('#save',v).onclick=async()=>{try{await api('/outbound-ips',{method:'POST',body:{ips,mode}});toast('Saved — '+ips.length+' IP(s), '+mode);go('outboundips');}catch(e){toast(e.message,true);}};
+  }
+  render();
+};
+
 VIEWS.routestock=async v=>{
   const d=await api('/route-inventory');
   const bar=r=>{if(r.pct==null)return '<span class="muted" style="font-size:12px">no stock tracking — record a top-up to start</span>';

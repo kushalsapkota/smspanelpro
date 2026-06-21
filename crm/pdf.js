@@ -97,7 +97,7 @@ function footerNote(doc, company) {
 // ---------------------------------------------------------------------------
 // Invoice / receipt
 // ---------------------------------------------------------------------------
-function invoicePdf(res, inv, profile, company, payments = [], cryptoPay = null) {
+function invoicePdf(res, inv, profile, company, payments = [], cryptoPay = null, usage = null) {
   const isReceipt = inv.type === 'receipt';
   const doc = open(res, `${inv.number}.pdf`);
   const meta = [
@@ -138,6 +138,34 @@ function invoicePdf(res, inv, profile, company, payments = [], cryptoPay = null)
   if (!isReceipt) {
     if (inv.paid) trow('Paid', eur(inv.paid));
     if (inv.status !== 'paid' && inv.status !== 'void') trow('Balance due', eur(Math.max(0, inv.total - (inv.paid || 0))), true);
+  }
+
+  // Per-day SMS usage this invoice/receipt covers (since the client's previous payment).
+  if (usage && Array.isArray(usage.rows)) {
+    y += 16;
+    if (y > 690) { doc.addPage(); y = 50; }
+    const period = (usage.from ? fdate(usage.from) : 'account start') + ' – ' + fdate(usage.to);
+    doc.fillColor(MUTE).font('Helvetica-Bold').fontSize(9).text('SMS USAGE BY DAY', 50, y);
+    doc.font('Helvetica').fontSize(8).fillColor(MUTE).text(period, 200, y, { width: 340, align: 'right' });
+    y += 14;
+    const ucols = [
+      { label: 'DATE', x: 56, w: 90 },
+      { label: 'MESSAGES', x: 200, w: 90, align: 'right' },
+      { label: 'SEGMENTS', x: 300, w: 90, align: 'right' },
+      { label: 'CHARGED', x: 430, w: 110, align: 'right' },
+    ];
+    y = tableHead(doc, y, ucols);
+    if (!usage.rows.length) {
+      doc.fillColor(MUTE).font('Helvetica').fontSize(9).text('No sends in this period.', 56, y); y += 16;
+    }
+    for (const u of usage.rows) {
+      if (y > 700) { doc.addPage(); y = 50; y = tableHead(doc, y, ucols); }
+      y = row(doc, y, ucols, [u.day, u.count, u.parts, eur3(u.credits)]);
+    }
+    if (usage.rows.length) {
+      y = row(doc, y + 2, ucols, ['Total', usage.total.count, usage.total.parts, eur3(usage.total.credits)], true);
+    }
+    y += 10;
   }
 
   if (payments.length) {

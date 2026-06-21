@@ -31,7 +31,12 @@ async function recordPayment(opts) {
   if (!user) throw new Error('client not found: ' + opts.username);
   const amount = db.round3(opts.amount);
   if (!(amount > 0)) throw new Error('amount must be > 0');
-  const credit = opts.credit !== false;
+  // A payment from a POSTPAID client must reduce their debt — crediting the balance is
+  // the only thing that settles it, so crediting can never be turned off for postpaid.
+  // (Operators uncheck "top up" thinking a postpaid payment isn't a top-up — but it is
+  // the settlement.) Prepaid keeps the opt-out so receipt-only records stay possible.
+  const isPostpaid = user.billing_mode === 'postpaid';
+  const credit = isPostpaid ? true : (opts.credit !== false);
   const wantReceipt = opts.receipt !== false;
 
   let invoice = null;
@@ -41,7 +46,9 @@ async function recordPayment(opts) {
       type: 'receipt',
       client_id: user._id, client_username: user.username,
       items: [{
-        description: `Balance top-up (prepaid SMS credit)${opts.method === 'usdt-trc20' ? ' — USDT TRC-20' : ''}`,
+        description: (isPostpaid
+          ? 'Payment received — postpaid settlement'
+          : 'Balance top-up (prepaid SMS credit)') + (opts.method === 'usdt-trc20' ? ' — USDT TRC-20' : ''),
         qty: 1, unit_price: amount, amount,
       }],
       subtotal: amount, tax: 0, total: amount, currency: 'EUR',

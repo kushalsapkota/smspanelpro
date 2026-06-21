@@ -13,6 +13,7 @@
  * DLRs: no webhook — engine polls pollStatus(route, batchId).
  */
 const axios = require('axios');
+const outbound = require('../shared/outbound');
 
 const DEFAULT_LOGIN_URL = 'https://app.quickconnect.biz/api/api/v1/login';
 // NOTE: the v1 /messaging endpoint ACKs {"message":"success"} but does NOT actually send.
@@ -62,7 +63,7 @@ async function getBearerToken(route, force) {
   if (cfg.mobile) body.mobile = String(cfg.mobile); else body.email = cfg.email;
 
   const res = await axios.post(loginUrl(route), body,
-    { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000, validateStatus: () => true });
+    outbound.cfg(route, { headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 15000, validateStatus: () => true }));
   if (res.status < 200 || res.status >= 300) {
     throw new Error(`QuickConnect login HTTP ${res.status}: ${JSON.stringify(res.data).slice(0, 200)}`);
   }
@@ -91,11 +92,11 @@ async function send(route, dest, msg, source) {
     if (sc) body.sender_code = sc;
 
     const url = messagingUrl(route);
-    let res = await axios.post(url, body, { headers: buildHeaders(auth.bearerToken, auth.apiToken), timeout: 20000, validateStatus: () => true });
+    let res = await axios.post(url, body, outbound.cfg(route, { headers: buildHeaders(auth.bearerToken, auth.apiToken), timeout: 20000, validateStatus: () => true }));
     // JWT expired between cache hits -> re-login once.
     if (res.status === 401 || res.status === 403) {
       auth = await getBearerToken(route, true);
-      res = await axios.post(url, body, { headers: buildHeaders(auth.bearerToken, auth.apiToken), timeout: 20000, validateStatus: () => true });
+      res = await axios.post(url, body, outbound.cfg(route, { headers: buildHeaders(auth.bearerToken, auth.apiToken), timeout: 20000, validateStatus: () => true }));
     }
     if (res.status < 200 || res.status >= 300) {
       return { success: false, providerStatus: 'failed', error: `QuickConnect HTTP ${res.status}: ${JSON.stringify(res.data).slice(0, 200)}`, rawData: res.data };
@@ -135,8 +136,8 @@ async function pollStatus(route, providerId) {
     const base = messagingUrl(route).replace(/\/(v\d+\/)?messaging$/, '');
     const hdr = buildHeaders(auth.bearerToken, auth.apiToken);
     // status path is under-documented; try v2 then v1.
-    let res = await axios.get(`${base}/v2/messaging/status/${encodeURIComponent(providerId)}`, { headers: hdr, timeout: 15000, validateStatus: () => true });
-    if (res.status === 404) res = await axios.get(`${base}/messaging/status/${encodeURIComponent(providerId)}`, { headers: hdr, timeout: 15000, validateStatus: () => true });
+    let res = await axios.get(`${base}/v2/messaging/status/${encodeURIComponent(providerId)}`, outbound.cfg(route, { headers: hdr, timeout: 15000, validateStatus: () => true }));
+    if (res.status === 404) res = await axios.get(`${base}/messaging/status/${encodeURIComponent(providerId)}`, outbound.cfg(route, { headers: hdr, timeout: 15000, validateStatus: () => true }));
     if (res.status !== 200) return null;
     const d = res.data || {};
     const raw = d.status || d.state || (d.data && (d.data.status || d.data.state)) ||

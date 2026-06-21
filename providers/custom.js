@@ -1,6 +1,7 @@
 // Generic Bearer-token JSON provider. Most REST SMS providers fit this with a field map.
 // route.config can override: { fieldTo, fieldText, fieldFrom, authHeader, authScheme, respIdPath, extra }
 const axios = require('axios');
+const outbound = require('../shared/outbound');
 
 function getPath(obj, path) {
   if (!obj || !path) return undefined;
@@ -25,8 +26,8 @@ async function send(route, dest, msg, source) {
     const method = (route.http_method || 'POST').toUpperCase();
     const url = route.api_url;
     const res = method === 'GET'
-      ? await axios.get(url, { params: body, headers, timeout: 15000 })
-      : await axios({ method, url, data: body, headers, timeout: 15000 });
+      ? await axios.get(url, outbound.cfg(route, { params: body, headers, timeout: 15000 }))
+      : await axios(outbound.cfg(route, { method, url, data: body, headers, timeout: 15000 }));
     const messageId = getPath(res.data, respIdPath) || getPath(res.data, 'data.' + respIdPath) || ('' + Date.now());
     return { success: true, messageId: String(messageId), rawData: res.data };
   } catch (err) {

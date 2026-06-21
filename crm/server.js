@@ -18,6 +18,8 @@ const telegram = require('../telegram');
 const M = require('./models');
 const { recordPayment, getCrmSettings } = require('./billing');
 const crypto2 = require('./crypto');
+const providers = require('../providers');
+const outbound = require('../shared/outbound');
 const pdf = require('./pdf');
 const mailer = require('./mailer');
 const imap = require('./imap');
@@ -129,7 +131,272 @@ app.get('/api/dashboard', wrap(async (req, res) => {
 // ---------------- SMS provider routes (for assigning to clients) ----------------
 app.get('/api/routes', wrap(async (req, res) => {
   const routes = await db.Route.find({}).sort({ name: 1 });
-  res.json(routes.map((r) => ({ id: String(r._id), name: r.name, type: r.type, is_active: r.is_active })));
+  // assigned-client counts (so the management page can show usage + guard deletes)
+  const counts = await db.User.aggregate([
+    { $match: { $or: [{ route_id: { $ne: null } }, { backup_route_id: { $ne: null } }] } },
+    { $project: { ids: ['$route_id', '$backup_route_id'] } },
+    { $unwind: '$ids' }, { $match: { ids: { $ne: null } } },
+    { $group: { _id: '$ids', n: { $sum: 1 } } },
+  ]);
+  const cmap = {}; counts.forEach((c) => { cmap[String(c._id)] = c.n; });
+  // NOTE: secrets (auth_token / smpp_password) are NOT in this list — fetch GET /api/routes/:id to edit.
+  res.json(routes.map((r) => ({
+    id: String(r._id), name: r.name, type: r.type, is_active: r.is_active,
+    api_url: r.api_url, http_method: r.http_method, sender_id: r.sender_id,
+    cost_per_sms: r.cost_per_sms, provides_dlr: r.provides_dlr,
+    smpp_host: r.smpp_host, smpp_port: r.smpp_port, smpp_system_id: r.smpp_system_id,
+    has_auth: !!r.auth_token, clients: cmap[String(r._id)] || 0,
+  })));
+}));
+
+// Allowed provider types (kept in sync with providers/index.js adapters + custom aliases).
+const ROUTE_TYPES = ['sparrow', 'hms', 'insoft', 'insoft2', 'insoftpanel', 'quickconnect', 'sociair', 'aakash', 'webzonesms', 'spellcpaas', 'routegod', 'spell', 'smpp', 'custom', 'globalzms', 'nestsms', 'nestpanel', 'nepal2rs', 'insoftsms', 'insoftsms2', 'insoftweb', 'arcbridge'];
+
+// Build the persisted field-set from a request body (create + edit share this).
+function routeFieldsFromBody(b, partial) {
+  const set = {};
+  const has = (k) => k in b;
+  if (has('name')) set.name = String(b.name || '').trim();
+  if (has('type')) {
+    if (!ROUTE_TYPES.includes(b.type)) throw new Error('unknown provider type: ' + b.type);
+    set.type = b.type;
+  }
+  if (has('api_url')) set.api_url = String(b.api_url || '').trim();
+  if (has('auth_token')) set.auth_token = String(b.auth_token || '');
+  if (has('http_method')) set.http_method = b.http_method === 'GET' ? 'GET' : 'POST';
+  if (has('sender_id')) set.sender_id = String(b.sender_id || '').trim();
+  if (has('cost_per_sms')) set.cost_per_sms = db.round3(Number(b.cost_per_sms) || 0);
+  if (has('provides_dlr')) set.provides_dlr = !!b.provides_dlr;
+  if (has('is_active')) set.is_active = !!b.is_active;
+  if (has('smpp_host')) set.smpp_host = String(b.smpp_host || '').trim();
+  if (has('smpp_port')) set.smpp_port = Number(b.smpp_port) || 2775;
+  if (has('smpp_system_id')) set.smpp_system_id = String(b.smpp_system_id || '').trim();
+  if (has('smpp_password')) set.smpp_password = String(b.smpp_password || '');
+  if (has('config')) {
+    let cfg = b.config;
+    if (typeof cfg === 'string') { const t = cfg.trim(); cfg = t ? JSON.parse(t) : {}; }
+    if (cfg && typeof cfg === 'object') set.config = cfg;
+  }
+  return set;
+}
+
+// Full route (incl. secrets) for the edit modal.
+app.get('/api/routes/:id', wrap(async (req, res) => {
+  const r = await db.Route.findById(req.params.id);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  res.json({
+    id: String(r._id), name: r.name, type: r.type, is_active: r.is_active,
+    api_url: r.api_url, auth_token: r.auth_token, http_method: r.http_method,
+    sender_id: r.sender_id, cost_per_sms: r.cost_per_sms, provides_dlr: r.provides_dlr,
+    smpp_host: r.smpp_host, smpp_port: r.smpp_port, smpp_system_id: r.smpp_system_id,
+    smpp_password: r.smpp_password, config: r.config || {},
+  });
+}));
+
+app.post('/api/routes', wrap(async (req, res) => {
+  let set;
+  try { set = routeFieldsFromBody(req.body || {}, false); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  if (!set.name) return res.status(400).json({ error: 'name required' });
+  if (!set.type) return res.status(400).json({ error: 'type required' });
+  const r = await db.Route.create(set);
+  res.status(201).json({ id: String(r._id), name: r.name, type: r.type });
+}));
+
+app.patch('/api/routes/:id', wrap(async (req, res) => {
+  let set;
+  try { set = routeFieldsFromBody(req.body || {}, true); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
+  const r = await db.Route.findByIdAndUpdate(req.params.id, { $set: set }, { new: true });
+  if (!r) return res.status(404).json({ error: 'not found' });
+  res.json({ id: String(r._id), name: r.name });
+}));
+
+app.delete('/api/routes/:id', wrap(async (req, res) => {
+  const inUse = await db.User.countDocuments({ $or: [{ route_id: req.params.id }, { backup_route_id: req.params.id }] });
+  if (inUse) return res.status(400).json({ error: `route is assigned to ${inUse} client(s) — reassign them first` });
+  await db.Route.deleteOne({ _id: req.params.id });
+  res.json({ ok: true });
+}));
+
+// Verify a route's credentials/connectivity WITHOUT sending an SMS, when the adapter supports it.
+app.post('/api/routes/:id/test', wrap(async (req, res) => {
+  const r = await db.Route.findById(req.params.id);
+  if (!r) return res.status(404).json({ error: 'not found' });
+  const adapter = providers.adapterFor(r.type);
+  if (typeof adapter.testConnection !== 'function') {
+    return res.json({ ok: false, supported: false, message: `${r.type} has no login/credential check — send a test SMS to verify.` });
+  }
+  try {
+    const out = await adapter.testConnection(r.toObject ? r.toObject() : r);
+    res.json({ ok: !!out.success, supported: true, message: out.success ? (out.note || 'Login OK') : (out.error || 'failed'), detail: out.rawData || null });
+  } catch (e) { res.json({ ok: false, supported: true, message: e.message }); }
+}));
+
+// ---- Provider API-key pool (INSOFT: many accounts, credit-tracked, auto-failover) ----
+const maskTok = t => { t = String(t || ''); return t.length <= 8 ? t : t.slice(0, 4) + '…' + t.slice(-4); };
+const keyView = k => ({
+  id: String(k._id), label: k.label || '', token_mask: maskTok(k.token),
+  sender_id: k.sender_id || '', host: k.host || '', has_pass: !!k.password,
+  credit_initial: k.credit_initial || 0, credit_remaining: k.credit_remaining || 0,
+  sms_sent: k.sms_sent || 0, status: k.status, last_used_at: k.last_used_at, last_error: k.last_error || '',
+});
+// web-panel routes hold accounts (username+password), not API tokens; credit isn't tracked per-send.
+const PANEL_TYPES = ['insoftpanel', 'insoftweb'];
+const isPanelType = t => PANEL_TYPES.includes(String(t || '').toLowerCase());
+async function keySummary(routeId) {
+  const all = await db.ProviderKey.find({ route_id: routeId }).sort({ status: 1, credit_remaining: -1 }).lean();
+  const active = all.filter(k => k.status === 'active' && (k.credit_remaining > 0 || !!k.password)); // panel accounts have no per-send credit
+  const remaining = all.reduce((s, k) => s + (k.credit_remaining || 0), 0);
+  const initial = all.reduce((s, k) => s + (k.credit_initial || 0), 0);
+  const sent = all.reduce((s, k) => s + (k.sms_sent || 0), 0);
+  const top = active.slice().sort((a, b) => b.credit_remaining - a.credit_remaining)[0];
+  return {
+    total: all.length, active: active.length,
+    exhausted: all.filter(k => k.status === 'exhausted').length,
+    disabled: all.filter(k => k.status === 'disabled').length,
+    credit_remaining: db.round3(remaining), credit_initial: db.round3(initial), sms_sent: sent,
+    next_key: top ? { id: String(top._id), label: top.label || maskTok(top.token), credit_remaining: top.credit_remaining } : null,
+    keys: all.map(keyView),
+  };
+}
+
+app.get('/api/routes/:id/keys', wrap(async (req, res) => {
+  const r = await db.Route.findById(req.params.id).lean();
+  if (!r) return res.status(404).json({ error: 'route not found' });
+  res.json(Object.assign({ route: { id: String(r._id), name: r.name, type: r.type, sender_id: r.sender_id, host: r.api_url } }, await keySummary(r._id)));
+}));
+
+// Bulk import: one key per line.
+//   API routes   : "token,credit,senderid,host"            (senderid/host optional → route default)
+//   web-panel    : "username,password,senderid,host"        (per-account login; credit not tracked)
+app.post('/api/routes/:id/keys/import', wrap(async (req, res) => {
+  const r = await db.Route.findById(req.params.id).lean();
+  if (!r) return res.status(404).json({ error: 'route not found' });
+  const panel = isPanelType(r.type);
+  const text = String((req.body || {}).text || '');
+  const existing = new Set((await db.ProviderKey.find({ route_id: r._id }).select('token').lean()).map(k => k.token));
+  const docs = []; const errors = []; let dupes = 0; const seen = new Set();
+  text.split(/\r?\n/).forEach((line, i) => {
+    const raw = line.trim();
+    if (!raw || raw.startsWith('#')) return;
+    const parts = raw.split(/[,\t]| {2,}|\s*\|\s*/).map(s => s.trim()).filter(s => s !== '');
+    const token = parts[0]; // API: api key  ·  panel: username
+    if (!token) { errors.push(`line ${i + 1}: no ${panel ? 'username' : 'token'}`); return; }
+    if (existing.has(token) || seen.has(token)) { dupes++; return; }
+    seen.add(token);
+    if (panel) {
+      const password = parts[1];
+      if (!password) { errors.push(`line ${i + 1}: no password for "${token}"`); return; }
+      docs.push({ route_id: r._id, token, password, label: parts[4] || '', sender_id: parts[2] || '', host: parts[3] || '', credit_initial: 0, credit_remaining: 0, status: 'active' });
+    } else {
+      const credit = parts.length > 1 ? Number(parts[1]) : 0;
+      if (parts.length > 1 && !isFinite(credit)) { errors.push(`line ${i + 1}: bad credit "${parts[1]}"`); return; }
+      docs.push({ route_id: r._id, token, label: parts[4] || '', sender_id: parts[2] || '', host: parts[3] || '', credit_initial: credit || 0, credit_remaining: credit || 0, status: 'active' });
+    }
+  });
+  if (docs.length) await db.ProviderKey.insertMany(docs, { ordered: false }).catch(e => errors.push(e.message));
+  res.json({ added: docs.length, duplicates: dupes, errors, summary: await keySummary(r._id) });
+}));
+
+app.post('/api/routes/:id/keys', wrap(async (req, res) => {
+  const r = await db.Route.findById(req.params.id).lean();
+  if (!r) return res.status(404).json({ error: 'route not found' });
+  const b = req.body || {};
+  const panel = isPanelType(r.type);
+  if (!b.token) return res.status(400).json({ error: panel ? 'username required' : 'token required' });
+  if (panel && !b.password) return res.status(400).json({ error: 'password required' });
+  if (await db.ProviderKey.countDocuments({ route_id: r._id, token: b.token })) return res.status(400).json({ error: `that ${panel ? 'username' : 'token'} is already in the pool` });
+  const credit = panel ? 0 : (Number(b.credit) || 0);
+  const k = await db.ProviderKey.create({
+    route_id: r._id, token: String(b.token), password: panel ? String(b.password) : '', label: b.label || '',
+    sender_id: b.sender_id || '', host: b.host || '',
+    credit_initial: credit, credit_remaining: credit, status: 'active',
+  });
+  res.status(201).json({ id: String(k._id), summary: await keySummary(r._id) });
+}));
+
+app.patch('/api/keys/:keyId', wrap(async (req, res) => {
+  const k = await db.ProviderKey.findById(req.params.keyId);
+  if (!k) return res.status(404).json({ error: 'key not found' });
+  const b = req.body || {};
+  if ('label' in b) k.label = String(b.label || '');
+  if ('sender_id' in b) k.sender_id = String(b.sender_id || '');
+  if ('host' in b) k.host = String(b.host || '');
+  if ('token' in b && b.token) k.token = String(b.token);
+  if ('password' in b && b.password) k.password = String(b.password); // web-panel account password (blank = keep)
+  if ('credit_remaining' in b && isFinite(Number(b.credit_remaining))) k.credit_remaining = db.round3(Number(b.credit_remaining));
+  if ('credit_initial' in b && isFinite(Number(b.credit_initial))) k.credit_initial = db.round3(Number(b.credit_initial));
+  if ('status' in b && ['active', 'exhausted', 'disabled'].includes(b.status)) k.status = b.status;
+  // auto-reactivate a key that now has credit again
+  if (k.status !== 'disabled' && k.credit_remaining > 0 && k.status === 'exhausted' && ('credit_remaining' in b)) k.status = 'active';
+  await k.save();
+  res.json({ id: String(k._id), summary: await keySummary(k.route_id) });
+}));
+
+// Top up a key's balance (e.g. after recharging that INSOFT account). Re-activates if it was dry.
+app.post('/api/keys/:keyId/topup', wrap(async (req, res) => {
+  const amt = Number((req.body || {}).amount);
+  if (!isFinite(amt) || amt === 0) return res.status(400).json({ error: 'amount required' });
+  const k = await db.ProviderKey.findById(req.params.keyId);
+  if (!k) return res.status(404).json({ error: 'key not found' });
+  k.credit_remaining = db.round3((k.credit_remaining || 0) + amt);
+  k.credit_initial = db.round3((k.credit_initial || 0) + Math.max(0, amt));
+  if (k.status === 'exhausted' && k.credit_remaining > 0) k.status = 'active';
+  await k.save();
+  res.json({ id: String(k._id), credit_remaining: k.credit_remaining, summary: await keySummary(k.route_id) });
+}));
+
+app.delete('/api/keys/:keyId', wrap(async (req, res) => {
+  const k = await db.ProviderKey.findById(req.params.keyId);
+  if (!k) return res.status(404).json({ error: 'key not found' });
+  const routeId = k.route_id;
+  await db.ProviderKey.deleteOne({ _id: k._id });
+  res.json({ ok: true, summary: await keySummary(routeId) });
+}));
+
+// ---- Outbound source-IP pool (send SMS from many VPS IPs; auto-skip blocked ones) ----
+function ipv4ok(s) { return /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(String(s || '')) && String(s).split('.').every(o => Number(o) >= 0 && Number(o) <= 255); }
+
+app.get('/api/outbound-ips', wrap(async (req, res) => {
+  await outbound.refresh(true);
+  const pool = outbound.pool();
+  const health = outbound.snapshot();
+  const server = outbound.serverIps();          // IPs actually configured on this box
+  const onBox = new Set(server.map(s => s.ip));
+  res.json({
+    mode: pool.mode,
+    ips: pool.ips.map(x => Object.assign({ ip: x.ip, label: x.label || '', disabled: !!x.disabled, on_box: onBox.has(x.ip) }, health[x.ip] || {})),
+    server_ips: server,
+  });
+}));
+
+app.post('/api/outbound-ips', wrap(async (req, res) => {
+  const b = req.body || {};
+  const mode = b.mode === 'sticky' ? 'sticky' : 'rotate';
+  const seen = new Set(); const ips = [];
+  for (const x of (Array.isArray(b.ips) ? b.ips : [])) {
+    const ip = String((x && x.ip) || '').trim();
+    if (!ipv4ok(ip)) return res.status(400).json({ error: 'invalid IPv4: ' + ip });
+    if (seen.has(ip)) continue; seen.add(ip);
+    ips.push({ ip, label: String((x && x.label) || '').slice(0, 40), disabled: !!(x && x.disabled) });
+  }
+  await db.Setting.findOneAndUpdate({ key: 'outbound_ips' }, { $set: { value: { ips, mode } } }, { upsert: true });
+  await outbound.refresh(true);
+  res.json({ ok: true, count: ips.length, mode });
+}));
+
+// Bind to an IP and ask an echo service what the world sees — verifies the IP is on the box and
+// how it egresses. Returns {bound, egress, match}. EADDRNOTAVAIL => IP not configured on the VPS.
+app.post('/api/outbound-ips/test', wrap(async (req, res) => {
+  const ip = String((req.body || {}).ip || '').trim();
+  if (!ipv4ok(ip)) return res.status(400).json({ error: 'invalid IPv4' });
+  try { res.json(Object.assign({ ok: true }, await outbound.egressCheck(ip))); }
+  catch (e) {
+    const code = e.code || '';
+    const hint = code === 'EADDRNOTAVAIL' ? 'this IP is not configured on the VPS — add it to the network interface first' : (e.message || 'failed');
+    res.json({ ok: false, bound: ip, error: hint, code });
+  }
 }));
 
 // Account-level settings the operator manages day-to-day (routing, price, suspend, content mode).
@@ -857,12 +1124,41 @@ app.delete('/api/invoices/:id', wrap(async (req, res) => {
   await db.Invoice.deleteOne({ _id: inv._id });
   res.json({ ok: true });
 }));
+// Per-day SMS usage an invoice/receipt covers: from the client's previous confirmed
+// payment (this invoice's own settling payment excluded) up to the invoice issue date.
+// Falls back to account start when there's no earlier payment. tz-aware day grouping
+// to match the settlement/statement tables.
+async function invoiceUsage(inv, tz) {
+  const to = new Date(inv.issued_date || inv.createdAt);
+  const prevPay = await db.Payment.findOne({
+    client_username: inv.client_username, status: 'confirmed',
+    invoice_id: { $ne: inv._id }, createdAt: { $lt: to },
+  }).sort({ createdAt: -1 });
+  const from = prevPay ? prevPay.createdAt : null;
+  const at = { $lt: to }; if (from) at.$gt = from;
+  const usage = await db.UsageEvent.aggregate([
+    { $match: { username: inv.client_username, at } },
+    { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$at', timezone: tz } }, parts: { $sum: '$parts' }, credits: { $sum: '$credits' }, count: { $sum: 1 } } },
+    { $sort: { _id: 1 } },
+  ]);
+  const rows = usage.map((u) => ({ day: u._id, parts: u.parts, credits: db.round3(u.credits), count: u.count }));
+  return {
+    from, to, rows,
+    total: {
+      parts: rows.reduce((a, u) => a + u.parts, 0),
+      credits: db.round3(rows.reduce((a, u) => a + u.credits, 0)),
+      count: rows.reduce((a, u) => a + u.count, 0),
+    },
+  };
+}
+
 app.get('/api/invoices/:id/pdf', wrap(async (req, res) => {
   const inv = await db.Invoice.findById(req.params.id);
   if (!inv) return res.status(404).json({ error: 'not found' });
-  const [settings, profile, payments] = await Promise.all([
+  const [settings, profile, payments, usage] = await Promise.all([
     getCrmSettings(), profileFor(inv.client_username),
     db.Payment.find({ invoice_id: inv._id }).sort({ createdAt: 1 }),
+    invoiceUsage(inv, db.DEFAULT_TZ),
   ]);
   // Unpaid manual invoice + wallet configured → print a unique USDT amount on the
   // PDF so the client can pay on-chain and the watcher settles THIS invoice.
@@ -873,7 +1169,7 @@ app.get('/api/invoices/:id/pdf', wrap(async (req, res) => {
       if (cryptoPay) cryptoPay = { ...cryptoPay.toObject(), qr: await require('qrcode').toBuffer(cryptoPay.wallet, { width: 256, margin: 1 }) };
     } catch (e) { console.error('[crm] invoice intent:', e.message); } // rate fetch down / below minimum → PDF still renders, just without the box
   }
-  pdf.invoicePdf(res, inv, profile, { ...settings.company, logoPath: logoPath() }, payments, cryptoPay);
+  pdf.invoicePdf(res, inv, profile, { ...settings.company, logoPath: logoPath() }, payments, cryptoPay, usage);
 }));
 
 // ---------------- monthly statements (tz-aware, on demand) ----------------
@@ -1104,9 +1400,10 @@ app.post('/api/invoices/:id/email', wrap(async (req, res) => {
   if (!(await mailer.isConfigured())) return res.status(400).json({ error: 'SMTP not configured — set it in Settings → Email' });
   const inv = await db.Invoice.findById(req.params.id);
   if (!inv) return res.status(404).json({ error: 'not found' });
-  const [settings, profile, payments] = await Promise.all([
+  const [settings, profile, payments, usage] = await Promise.all([
     getCrmSettings(), profileFor(inv.client_username),
     db.Payment.find({ invoice_id: inv._id }).sort({ createdAt: 1 }),
+    invoiceUsage(inv, db.DEFAULT_TZ),
   ]);
   const to = ((req.body && req.body.to) || '').trim() || profile.email;
   if (!to) return res.status(400).json({ error: 'no email on file for this client — add one on their profile or pass an address' });
@@ -1117,7 +1414,7 @@ app.post('/api/invoices/:id/email', wrap(async (req, res) => {
       if (cryptoPay) cryptoPay = { ...cryptoPay.toObject(), qr: await require('qrcode').toBuffer(cryptoPay.wallet, { width: 256, margin: 1 }) };
     } catch (e) { console.error('[crm] invoice intent:', e.message); }
   }
-  const buf = await pdfBuffer((sink) => pdf.invoicePdf(sink, inv, profile, { ...settings.company, logoPath: logoPath() }, payments, cryptoPay));
+  const buf = await pdfBuffer((sink) => pdf.invoicePdf(sink, inv, profile, { ...settings.company, logoPath: logoPath() }, payments, cryptoPay, usage));
   const co = settings.company || {};
   const due = db.round3(inv.total - (inv.paid || 0));
   const paid = inv.status === 'paid';
