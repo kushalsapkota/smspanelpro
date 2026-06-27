@@ -22,12 +22,16 @@ async function send(route, dest, msg, source) {
   const headers = { 'Content-Type': 'application/json' };
   if (route.auth_token) headers[c.authHeader || 'Authorization'] = (c.authScheme || 'Bearer ') + route.auth_token;
 
+  // Tunable per-route (some upstreams accept the SMS but answer slowly — a short
+  // timeout marks a delivered message as failed). config.timeout_ms / route.timeout_ms override.
+  const timeout = (c.timeout_ms) || route.timeout_ms || 40000;
+
   try {
     const method = (route.http_method || 'POST').toUpperCase();
     const url = route.api_url;
     const res = method === 'GET'
-      ? await axios.get(url, outbound.cfg(route, { params: body, headers, timeout: 15000 }))
-      : await axios(outbound.cfg(route, { method, url, data: body, headers, timeout: 15000 }));
+      ? await axios.get(url, outbound.cfg(route, { params: body, headers, timeout }))
+      : await axios(outbound.cfg(route, { method, url, data: body, headers, timeout }));
     const messageId = getPath(res.data, respIdPath) || getPath(res.data, 'data.' + respIdPath) || ('' + Date.now());
     return { success: true, messageId: String(messageId), rawData: res.data };
   } catch (err) {

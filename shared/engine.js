@@ -114,8 +114,10 @@ async function contentPolicy() {
   if (Date.now() - _cpAt < 30000) return _cp;
   try { const s = await db.Setting.findOne({ key: 'content_policy' }); _cp = (s && s.value) || {}; }
   catch (_) { _cp = _cp || {}; }
-  // sensible defaults: force auto-templating on for everyone, numeric codes 4–10 digits
-  _cp = Object.assign({ force_auto_template: true, numeric_only: true, min_len: 4, max_len: 10 }, _cp);
+  // Defaults: do NOT force auto-templating on everyone — honour each user's content
+  // mode (bypass_template) so passthrough actually works. The global "force auto-template
+  // for ALL" is an explicit operator override that must be turned on deliberately.
+  _cp = Object.assign({ force_auto_template: false, numeric_only: true, min_len: 4, max_len: 10 }, _cp);
   _cpAt = Date.now();
   return _cp;
 }
@@ -194,8 +196,8 @@ async function pickRoutes(user, dest) {
   const out = [];
   const push = (r) => { if (r && r.is_active && !out.find((x) => String(x._id) === String(r._id))) out.push(r); };
 
-  // LCR: longest matching prefix rule
-  const rules = await db.RoutingRule.find({ is_active: true });
+  // LCR: longest matching prefix rule. Rules are global (username null) or scoped to one client.
+  const rules = await db.RoutingRule.find({ is_active: true, $or: [{ username: null }, { username: { $exists: false } }, { username: user.username }] });
   const matched = (rules || []).filter((r) => String(dest).startsWith(r.prefix)).sort((a, b) => b.prefix.length - a.prefix.length || (b.priority - a.priority));
   for (const m of matched) push(await db.Route.findById(m.route_id));
 
@@ -315,6 +317,9 @@ async function fireDispatch(p) {
   db.recordUsage({ user_id: p.user._id, username: p.user.username, parts: p.parts, credits: 0, route_name: '', status: 'failed' });
   dlrlog.append({ username: p.user.username, destination: p.dest, message_id: p.messageId, parts: p.parts, credits: 0, route_name: '', status: 'failed', dlr_status: 'undelivered', provider_status: 'failed' });
   await db.MessageLog.findByIdAndUpdate(p.log._id, { $set: { status: 'failed', dlr_status: 'undelivered', provider_status: 'failed', error: lastErr } });
+  // Exact DLR: a genuinely-failed message reports UNDELIV to the client + webhook instead of
+  // hanging 'pending' forever. (Honest — this is a real failure, not a fabricated 'delivered'.)
+  deliverDlr(p, 'undelivered').catch(() => {});
   telegram.systemAlert(`❌ Dispatch failed ${p.user.username} -> ${p.dest}: ${lastErr}`);
   return { success: false, error: lastErr };
 }

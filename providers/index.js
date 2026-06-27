@@ -20,7 +20,10 @@ const adapters = {
   nestsms: require('./nestsms'),
   nestpanel: require('./nestpanel'),
   spellcpaas: require('./spellcpaas'),
+  jasmin: require('./jasmin'),
+  xoro: require('./xoro'),
 };
+adapters.nea = adapters.jasmin;     // NEA reseller route runs over a Jasmin SMS gateway
 adapters.routegod = adapters.spellcpaas; // alias (operator's name for the Spell CPaaS route)
 adapters.spell = adapters.spellcpaas;    // alias
 adapters.webzone = adapters.webzonesms; // alias
@@ -37,7 +40,7 @@ function adapterFor(type) { return adapters[(type || 'custom').toLowerCase()] ||
 
 // ---- route health store ----
 const health = new Map(); // routeId -> { fails, latency:[], suspendedUntil, lastError }
-const SUSPEND_AFTER = 3;       // consecutive failures -> open circuit, fail over to the backup route
+const SUSPEND_AFTER = 10;      // consecutive failures -> open circuit, fail over to the backup route
 const SUSPEND_MS = 45 * 1000;  // circuit-breaker open duration (then retests the route)
 
 function h(routeId) {
