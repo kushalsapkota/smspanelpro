@@ -114,6 +114,11 @@ const RouteSchema = new Schema({
   auto_failover_route_id: { type: Schema.Types.ObjectId, ref: 'Route', default: null },
   is_active: { type: Boolean, default: true },
 
+  // Per-route outbound HTTP timeout (ms). Adapters read route.timeout_ms; blank/null => the
+  // adapter's own default (e.g. Spell CPaaS 60000). Raise for slow providers that hang before
+  // answering (spellcpaas.com redirects/stalls under load).
+  timeout_ms: { type: Number, default: null },
+
   // Vendor ownership: a route may be supplied by an external vendor (a 3rd-party SMS supplier who
   // self-registers their endpoint + balance in the vendor portal :6699). vendor_id = null means the
   // route is the operator's own. Vendor-submitted routes start vendor_status 'pending' + is_active
