@@ -113,6 +113,13 @@ const RouteSchema = new Schema({
 
   auto_failover_route_id: { type: Schema.Types.ObjectId, ref: 'Route', default: null },
   is_active: { type: Boolean, default: true },
+
+  // Vendor ownership: a route may be supplied by an external vendor (a 3rd-party SMS supplier who
+  // self-registers their endpoint + balance in the vendor portal :6699). vendor_id = null means the
+  // route is the operator's own. Vendor-submitted routes start vendor_status 'pending' + is_active
+  // false so they can't carry traffic until the operator approves & assigns them.
+  vendor_id: { type: String, default: null, index: true },
+  vendor_status: { type: String, default: 'approved' }, // pending | approved | rejected
 }, { timestamps: true });
 
 const CreditTransactionSchema = new Schema({
@@ -174,6 +181,7 @@ const RoutingRuleSchema = new Schema({
   prefix: { type: String, required: true, index: true }, // e.g. 97798
   route_id: { type: Schema.Types.ObjectId, ref: 'Route', required: true },
   priority: { type: Number, default: 0 },
+  username: { type: String, default: null, index: true }, // null = global; else only this client's traffic
   is_active: { type: Boolean, default: true },
 }, { timestamps: true });
 
@@ -318,6 +326,20 @@ const ProviderKeySchema = new Schema({
 }, { timestamps: true });
 ProviderKeySchema.index({ route_id: 1, status: 1, credit_remaining: -1 });
 
+// External SMS-supplier accounts for the Vendor portal (:6699). The operator creates a vendor here
+// (vendor_id + password handed to the supplier); the vendor logs in, registers their endpoint API +
+// declared balance (each becomes a Route with vendor_id set), and can only ever see their own
+// endpoints' SMS usage + remaining balance — nothing about the operator's clients or pricing.
+const VendorSchema = new Schema({
+  vendor_id: { type: String, required: true, unique: true, index: true }, // login id given to the vendor
+  name: { type: String, default: '' },                                    // company / contact name
+  email: { type: String, default: '' },
+  password: { type: String, required: true },                             // bcrypt hash
+  is_active: { type: Boolean, default: true },
+  notes: { type: String, default: '' },                                   // operator-only notes
+  last_login_at: { type: Date, default: null },
+}, { timestamps: true });
+
 // ----------------------------------------------------------------------------
 // Model registration (real Mongoose, or in-memory mock)
 // ----------------------------------------------------------------------------
@@ -329,7 +351,7 @@ const defs = {
   WebhookLog: WebhookLogSchema, DropCommand: DropCommandSchema,
   Invoice: InvoiceSchema, Payment: PaymentSchema,
   UsageEvent: UsageEventSchema, ApiKey: ApiKeySchema, RouteTopup: RouteTopupSchema,
-  ProviderKey: ProviderKeySchema,
+  ProviderKey: ProviderKeySchema, Vendor: VendorSchema,
 };
 
 let models = {};

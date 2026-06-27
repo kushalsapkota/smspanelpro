@@ -90,7 +90,11 @@ function parseSubmit(data) {
 
 async function call(c, extra) {
   const url = `${c.base}/api/smsapi`;
-  const opts = outbound.cfg(c.route, { timeout: c.timeout || 20000, validateStatus: () => true });
+  // Do NOT follow redirects: a valid submit that the provider rejects (campaign/route approval, a
+  // web-auth guard, or a server-side error like an unwritable storage/logs/laravel.log) answers with
+  // 302 -> homepage. Following it would land on the marketing page and log a multi-KB HTML blob; we
+  // want to see the bare 302 + Location and report it cleanly instead.
+  const opts = outbound.cfg(c.route, { timeout: c.timeout || 60000, maxRedirects: 0, validateStatus: () => true });
   if (c.method === 'POST') {
     const qs = require('querystring');
     return axios.post(url, qs.stringify(params(c, extra)), Object.assign(opts, {
@@ -101,13 +105,20 @@ async function call(c, extra) {
 }
 
 async function send(route, dest, msg) {
-  const c = cfg(route); c.route = route; c.timeout = route.timeout_ms || 20000;
+  const c = cfg(route); c.route = route; c.timeout = route.timeout_ms || 60000;
   if (!c.key && !c.username) {
     return { success: false, providerStatus: 'error', error: 'Spell CPaaS: no API key (set the route auth_token, or username/password in config)' };
   }
   try {
     const contacts = String(dest).split(',').map(s => toLocal(s, c.keepCC)).filter(Boolean).join(',');
     const res = await call(c, { contacts, msg: String(msg).slice(0, 720) });
+    // A 3xx means the submit reached the app but was bounced (no shoot-id, no credit consumed) — a
+    // provider-side block, not a recipient/content fault. Report it plainly rather than chasing the
+    // redirect into an HTML page.
+    if (res.status >= 300 && res.status < 400) {
+      const loc = (res.headers && (res.headers.location || res.headers.Location)) || 'redirect';
+      return { success: false, providerStatus: 'failed', error: `Spell CPaaS: submission rejected (HTTP ${res.status} → ${loc}) — provider-side block (campaign/route approval, web-auth, or server error on spellcpaas.com); no credit consumed`, rawData: { status: res.status, location: loc } };
+    }
     const out = parseSubmit(res.data);
     if (out.ok) {
       // Real DLR endpoint exists → engine will poll if route.provides_dlr is true; report 'accepted' now.
@@ -125,7 +136,7 @@ async function pollStatus(route, providerId) {
   if (!providerId || !c.key) return null;
   try {
     const url = `${c.base}/api/miscapi/${encodeURIComponent(c.key)}/getDLR/${encodeURIComponent(providerId)}`;
-    const res = await axios.get(url, outbound.cfg(route, { timeout: 15000, validateStatus: () => true, headers: { Accept: 'application/json' } }));
+    const res = await axios.get(url, outbound.cfg(route, { timeout: 30000, validateStatus: () => true, headers: { Accept: 'application/json' } }));
     if (res.status !== 200) return null;
     const v = (typeof res.data === 'object' ? JSON.stringify(res.data) : String(res.data || '')).toUpperCase();
     if (/DELIVRD|DELIVERED|\bSUCCESS\b/.test(v)) return 'delivered';

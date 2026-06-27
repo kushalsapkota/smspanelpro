@@ -29,7 +29,7 @@ const kindIc={note:'📝',call:'📞',meeting:'👥',email:'✉️',task:'✅',s
 const NAV=[
   ['MAIN',[['dashboard','📊 Dashboard'],['clients','👥 Clients'],['status','🟢 Online status'],['mail','✉️ Mail'],['tickets','🎫 Tickets'],['traffic','📡 Traffic & DLR'],['leads','🎯 Leads'],['tasks','✅ Tasks']]],
   ['MONEY',[['payments','💶 Payments'],['postpaid','📆 Postpaid'],['crypto','₮ Crypto top-ups'],['invoices','🧾 Invoices'],['statements','📅 Statements']]],
-  ['SYSTEM',[['routes','📡 Routes'],['routestock','📦 Route stock'],['outboundips','🌐 Outbound IPs'],['templates','🔤 Auto-templates'],['domains','🌐 Domains'],['settings','⚙️ Settings']]],
+  ['SYSTEM',[['routes','📡 Routes'],['vendors','🏷️ Vendors'],['routestock','📦 Route stock'],['outboundips','🌐 Outbound IPs'],['templates','🔤 Auto-templates'],['domains','🌐 Domains'],['settings','⚙️ Settings']]],
 ];
 const routeOpts=(routes,sel)=>`<option value="">— no route (can't send) —</option>`+routes.map(r=>`<option value="${r.id}" ${String(sel)===r.id?'selected':''}>${esc(r.name)} (${esc(r.type)})${r.is_active?'':' [inactive]'}</option>`).join('');
 
@@ -44,7 +44,7 @@ async function boot(){
   $('#nav').querySelectorAll('.nav-item').forEach(n=>n.onclick=()=>go(n.dataset.nav));
   go('dashboard');
 }
-function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',status:'Online status',mail:'Mail',tickets:'Support tickets',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',postpaid:'Postpaid clients',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',routes:'SMS Routes',routestock:'Route stock',outboundips:'Outbound IPs',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
+function setActive(k){$('#nav').querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.nav===k));const t={dashboard:'Dashboard',clients:'Clients',status:'Online status',mail:'Mail',tickets:'Support tickets',traffic:'Traffic & DLR',leads:'Leads pipeline',tasks:'Tasks & follow-ups',payments:'Payments',postpaid:'Postpaid clients',crypto:'Crypto top-ups',invoices:'Invoices',statements:'Monthly statements',routes:'SMS Routes',vendors:'Vendors',routestock:'Route stock',outboundips:'Outbound IPs',templates:'Auto-templates',domains:'Domains',settings:'Settings',client:'Client'};$('#pageTitle').textContent=t[k]||k;}
 let CUR='dashboard',CUR_ARG=null;
 async function go(k,arg){CUR=k;CUR_ARG=arg;setActive(k);const v=$('#view');v.innerHTML='<p class="muted">Loading…</p>';try{await VIEWS[k](v,arg);}catch(e){v.innerHTML=`<p class="err">${esc(e.message)}</p>`;}}
 window.__go=go;
@@ -433,6 +433,81 @@ VIEWS.routes=async v=>{
   v.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(Number(b.dataset.c)>0){toast('Assigned to '+b.dataset.c+' client(s) — reassign first',true);return;}if(!confirm('Delete route “'+b.dataset.n+'”?'))return;try{await api('/routes/'+b.dataset.del,{method:'DELETE'});toast('Deleted');go('routes');}catch(e){toast(e.message,true);}});
 };
 
+// ---------------- Vendors (external suppliers + their self-registered endpoints) ----------------
+function vendorCredModal(vid,pass,isReset){
+  modal((isReset?'Password reset':'Vendor created')+' — '+vid,
+   `<p class="muted">Give these to your vendor. They log in at the <b>Vendor Portal (port 6699)</b>. The password is shown <b>once</b>.</p>
+    <div class="field"><label>Vendor ID</label><input id="vc_id" value="${esc(vid)}" readonly/></div>
+    <div class="field"><label>Password</label><input id="vc_pw" value="${esc(pass)}" readonly/></div>
+    <button class="primary" id="vc_copy">📋 Copy login</button>`,
+   (b,close)=>{$('#vc_copy',b).onclick=()=>{copyTxt(`Vendor Portal\nID: ${vid}\nPassword: ${pass}`);};});
+}
+function newVendorModal(){
+  modal('New vendor',
+   `<div class="field"><label>Name / company</label><input id="nv_name" placeholder="Acme SMS Pvt Ltd"/></div>
+    <div class="field"><label>Vendor ID <span class="muted">(login — blank = from name)</span></label><input id="nv_id" placeholder="acme-sms"/></div>
+    <div class="field"><label>Email <span class="muted">(optional)</span></label><input id="nv_email"/></div>
+    <div class="field"><label>Password <span class="muted">(blank = auto-generate)</span></label><input id="nv_pw"/></div>
+    <div class="field"><label>Notes <span class="muted">(operator-only)</span></label><input id="nv_notes"/></div>
+    <p id="nv_err" class="err"></p>
+    <button class="primary" id="nv_go">Create vendor</button>`,
+   (b,close)=>{$('#nv_go',b).onclick=async()=>{$('#nv_err',b).textContent='';try{
+     const r=await api('/vendors',{method:'POST',body:{name:$('#nv_name',b).value,vendor_id:$('#nv_id',b).value,email:$('#nv_email',b).value,password:$('#nv_pw',b).value,notes:$('#nv_notes',b).value}});
+     close();vendorCredModal(r.vendor_id,r.password,false);go('vendors');
+   }catch(e){$('#nv_err',b).textContent=e.message;}};});
+}
+async function vendorEndpointsModal(vid,name){
+  const eps=await api('/vendors/'+encodeURIComponent(vid)+'/endpoints');
+  modal('Endpoints — '+(name||vid),
+   `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Used</th><th>Balance</th><th></th></tr></thead><tbody>
+    ${eps.map(e=>`<tr>
+      <td><b>${esc(e.name)}</b><div class="mono muted" style="font-size:10px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.api_url||'—')}</div></td>
+      <td><span class="badge blue">${esc(e.type)}</span></td>
+      <td>${e.vendor_status==='approved'?'<span class="badge green">approved</span>':e.vendor_status==='rejected'?'<span class="badge red">rejected</span>':'<span class="badge">pending</span>'}</td>
+      <td>${(e.used||0).toLocaleString()}</td><td>${(e.balance||0).toLocaleString()}</td>
+      <td style="white-space:nowrap">${e.vendor_status!=='approved'?`<button class="primary" data-ap="${e.id}">✓ Approve</button> `:''}${e.vendor_status!=='rejected'?`<button data-rj="${e.id}">✕ Reject</button>`:''}</td>
+    </tr>`).join('')||'<tr><td colspan="6" class="muted">This vendor hasn’t added any endpoints yet.</td></tr>'}
+    </tbody></table></div>
+    <p class="muted" style="font-size:11px">Approving makes the endpoint active &amp; assignable — set it on a client in their 📡 Account / route panel (it appears in the Routes list too).</p>`,
+   (b,close)=>{
+     b.querySelectorAll('[data-ap]').forEach(x=>x.onclick=async()=>{try{await api('/vendor-routes/'+x.dataset.ap+'/approve',{method:'POST'});toast('Approved');close();vendorEndpointsModal(vid,name);}catch(e){toast(e.message,true);}});
+     b.querySelectorAll('[data-rj]').forEach(x=>x.onclick=async()=>{if(!confirm('Reject this endpoint?'))return;try{await api('/vendor-routes/'+x.dataset.rj+'/reject',{method:'POST'});toast('Rejected');close();vendorEndpointsModal(vid,name);}catch(e){toast(e.message,true);}});
+   });
+}
+VIEWS.vendors=async v=>{
+  const [vendors,pending]=await Promise.all([api('/vendors'),api('/vendor-routes/pending').catch(()=>[])]);
+  v.innerHTML=`<h2 class="title">Vendors <button id="nv" class="primary" style="float:right">+ New vendor</button></h2>
+  <p class="muted" style="font-size:12px">External SMS suppliers. Create a vendor → give them the ID &amp; password → they add their endpoint APIs &amp; balance in the <b>Vendor Portal (:6699)</b>. New endpoints arrive here as <b>pending</b> for you to approve, then assign to clients.</p>
+  ${pending.length?`<div class="panel" style="border-color:#caa700"><h3>⏳ ${pending.length} endpoint(s) awaiting approval</h3>
+    <div class="table-wrap"><table><thead><tr><th>Vendor</th><th>Endpoint</th><th>Type</th><th>Balance</th><th></th></tr></thead><tbody>
+    ${pending.map(p=>`<tr><td>${esc(p.vendor_id)}</td><td><b>${esc(p.name)}</b></td><td><span class="badge blue">${esc(p.type)}</span></td><td>${(p.balance||0).toLocaleString()}</td>
+      <td style="white-space:nowrap"><button class="primary" data-pap="${p.id}">✓ Approve</button> <button data-prj="${p.id}">✕ Reject</button></td></tr>`).join('')}
+    </tbody></table></div></div>`:''}
+  <div class="table-wrap"><table><thead><tr><th>Vendor</th><th>Contact</th><th>Endpoints</th><th>Balance</th><th>SMS used</th><th>Status</th><th></th></tr></thead><tbody>
+  ${vendors.map(x=>`<tr>
+    <td><b>${esc(x.name||x.vendor_id)}</b><div class="mono muted" style="font-size:11px">${esc(x.vendor_id)}</div></td>
+    <td style="font-size:12px">${esc(x.email||'—')}</td>
+    <td>${x.endpoints||0}${x.pending?` <span class="badge">${x.pending} pending</span>`:''}</td>
+    <td>${(x.balance||0).toLocaleString()}</td>
+    <td>${(x.used||0).toLocaleString()}</td>
+    <td>${x.is_active?'<span class="badge green">active</span>':'<span class="badge red">disabled</span>'}</td>
+    <td style="white-space:nowrap">
+      <button data-eps="${esc(x.vendor_id)}" data-n="${esc(x.name||x.vendor_id)}">📡 Endpoints</button>
+      <button data-pw="${esc(x.vendor_id)}">🔑</button>
+      <button data-tog="${esc(x.vendor_id)}" data-a="${x.is_active?1:0}">${x.is_active?'⏸':'▶'}</button>
+      <button data-del="${esc(x.vendor_id)}" data-c="${x.endpoints||0}">🗑</button>
+    </td>
+  </tr>`).join('')||'<tr><td colspan="7" class="muted">No vendors yet — click “+ New vendor”.</td></tr>'}
+  </tbody></table></div>`;
+  $('#nv',v).onclick=newVendorModal;
+  v.querySelectorAll('[data-pap]').forEach(b=>b.onclick=async()=>{try{await api('/vendor-routes/'+b.dataset.pap+'/approve',{method:'POST'});toast('Approved');go('vendors');}catch(e){toast(e.message,true);}});
+  v.querySelectorAll('[data-prj]').forEach(b=>b.onclick=async()=>{if(!confirm('Reject this endpoint?'))return;try{await api('/vendor-routes/'+b.dataset.prj+'/reject',{method:'POST'});toast('Rejected');go('vendors');}catch(e){toast(e.message,true);}});
+  v.querySelectorAll('[data-eps]').forEach(b=>b.onclick=()=>vendorEndpointsModal(b.dataset.eps,b.dataset.n));
+  v.querySelectorAll('[data-pw]').forEach(b=>b.onclick=async()=>{if(!confirm('Reset password for '+b.dataset.pw+'?'))return;try{const r=await api('/vendors/'+encodeURIComponent(b.dataset.pw)+'/password',{method:'POST',body:{}});vendorCredModal(b.dataset.pw,r.password,true);}catch(e){toast(e.message,true);}});
+  v.querySelectorAll('[data-tog]').forEach(b=>b.onclick=async()=>{try{await api('/vendors/'+encodeURIComponent(b.dataset.tog),{method:'PATCH',body:{is_active:b.dataset.a!=='1'}});toast('Updated');go('vendors');}catch(e){toast(e.message,true);}});
+  v.querySelectorAll('[data-del]').forEach(b=>b.onclick=async()=>{if(Number(b.dataset.c)>0){toast('Vendor owns '+b.dataset.c+' endpoint(s) — delete those routes first',true);return;}if(!confirm('Delete vendor '+b.dataset.del+'?'))return;try{await api('/vendors/'+encodeURIComponent(b.dataset.del),{method:'DELETE'});toast('Deleted');go('vendors');}catch(e){toast(e.message,true);}});
+};
+
 // Provider-type-aware credential fields (prefilled from the route on edit).
 function routeCredFields(type,r){r=r||{};let creds={};try{if(r.auth_token)creds=JSON.parse(r.auth_token);}catch(_){}
   if(type==='sparrow')return `<div class="field"><label>Sparrow API token</label><input id="r_tok" value="${esc(r.auth_token||'')}" placeholder="v2_..."/></div>
@@ -454,6 +529,9 @@ function routeCredFields(type,r){r=r||{};let creds={};try{if(r.auth_token)creds=
     <div class="field"><label>Route ID <span class="muted">(optional)</span></label><input id="r_routeid" value="${esc(sc.routeid||'')}"/></div></div>
     <div class="field"><label>Base URL <span class="muted">(blank = default)</span></label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="https://spellcpaas.com"/></div>
     <p class="muted" style="font-size:11px">Spell CPaaS HTTP API (<b>spellcpaas.com</b>). Key goes in the API key field; campaign &amp; route id are account-specific. This provider HAS a real <b>getDLR</b> endpoint → you can turn ON delivery receipts below. Use <b>Test</b> to verify the key.</p>`;}
+  if(type==='xoro')return `<div class="field"><label>Xoro API token <span class="muted">(x-api-token)</span></label><input id="r_tok" value="${esc(r.auth_token||'')}" placeholder="1f88a9c8-…"/></div>
+    <div class="field"><label>Invoke URL <span class="muted">(blank = default)</span></label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="https://xoro.leosainamaina.org/api/v1/invoke"/></div>
+    <p class="muted" style="font-size:11px">Xoro direct API (body <b>msg</b>/<b>num</b>, 10-digit numbers). Returns a synchronous <b>status:success</b> verdict → turn <b>real DLRs</b> ON for exact delivered/failed (no fake delivered). Use <b>Test</b> to verify the token.</p>`;
   if(type==='webzonesms')return `<div class="field"><label>Webzone API token</label><input id="r_tok" value="${esc(r.auth_token||'')}" placeholder="token from sms.webzonesms.com → Developers"/></div>
     <div class="field"><label>Send URL <span class="muted">(blank = default)</span></label><input id="r_url" value="${esc(r.api_url||'')}" placeholder="http://sms.webzonesms.com/api/v3/sms"/></div>
     <p class="muted" style="font-size:11px">“Ultimate SMS” panel. Token goes in the <b>token</b> field (not Bearer). Set the <b>Sender ID</b> below to your approved identity. No DLR API → sends show <b>accepted</b>. Use <b>Test</b> to verify the account isn't expired / out of credit.</p>`;
@@ -470,7 +548,7 @@ function routeCredFields(type,r){r=r||{};let creds={};try{if(r.auth_token)creds=
     <div class="row"><div class="field"><label>Auth token / API key</label><textarea id="r_tok" rows="2">${esc(r.auth_token||'')}</textarea></div>
     <div class="field"><label>HTTP method</label><select id="r_method"><option ${r.http_method!=='GET'?'selected':''}>POST</option><option ${r.http_method==='GET'?'selected':''}>GET</option></select></div></div>`;}
 
-function routeModal(r){r=r||{};const types=['sparrow','hms','insoft','insoft2','insoftpanel','quickconnect','sociair','aakash','webzonesms','spellcpaas','routegod','spell','smpp','custom','globalzms','nestsms','nestpanel','nepal2rs','insoftsms','insoftsms2','insoftweb','arcbridge'];
+function routeModal(r){r=r||{};const types=['xoro','sparrow','hms','insoft','insoft2','insoftpanel','quickconnect','sociair','aakash','webzonesms','spellcpaas','routegod','spell','smpp','custom','globalzms','nestsms','nestpanel','nepal2rs','insoftsms','insoftsms2','insoftweb','arcbridge'];
   modal((r.id?'Edit':'New')+' route',`
   <div class="row"><div class="field"><label>Name</label><input id="r_name" value="${esc(r.name||'')}"/></div>
   <div class="field"><label>Provider type</label><select id="r_type">${types.map(t=>`<option ${r.type===t?'selected':''}>${t}</option>`).join('')}</select></div></div>

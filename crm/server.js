@@ -150,7 +150,7 @@ app.get('/api/routes', wrap(async (req, res) => {
 }));
 
 // Allowed provider types (kept in sync with providers/index.js adapters + custom aliases).
-const ROUTE_TYPES = ['sparrow', 'hms', 'insoft', 'insoft2', 'insoftpanel', 'quickconnect', 'sociair', 'aakash', 'webzonesms', 'spellcpaas', 'routegod', 'spell', 'smpp', 'custom', 'globalzms', 'nestsms', 'nestpanel', 'nepal2rs', 'insoftsms', 'insoftsms2', 'insoftweb', 'arcbridge'];
+const ROUTE_TYPES = ['xoro', 'sparrow', 'hms', 'insoft', 'insoft2', 'insoftpanel', 'quickconnect', 'sociair', 'aakash', 'webzonesms', 'spellcpaas', 'routegod', 'spell', 'smpp', 'custom', 'globalzms', 'nestsms', 'nestpanel', 'nepal2rs', 'insoftsms', 'insoftsms2', 'insoftweb', 'arcbridge'];
 
 // Build the persisted field-set from a request body (create + edit share this).
 function routeFieldsFromBody(b, partial) {
@@ -216,6 +216,119 @@ app.delete('/api/routes/:id', wrap(async (req, res) => {
   const inUse = await db.User.countDocuments({ $or: [{ route_id: req.params.id }, { backup_route_id: req.params.id }] });
   if (inUse) return res.status(400).json({ error: `route is assigned to ${inUse} client(s) — reassign them first` });
   await db.Route.deleteOne({ _id: req.params.id });
+  res.json({ ok: true });
+}));
+
+// ============================ VENDORS (external SMS suppliers) ============================
+// Operator creates a vendor here (id + password handed to the supplier). The vendor logs into the
+// vendor portal (:6699), registers endpoint APIs + declared balance — each becomes a Route with
+// vendor_id set, vendor_status 'pending', is_active false — and the operator approves & assigns them.
+const crypto = require('crypto');
+const slugify = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24);
+const genPass = () => crypto.randomBytes(6).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 10) || crypto.randomBytes(8).toString('hex').slice(0, 10);
+
+// Summarise a vendor's endpoints (count + balance + used) for the list view.
+async function vendorStats(vendor_id) {
+  const rs = await db.Route.find({ vendor_id }).lean();
+  let balance = 0, used = 0, pending = 0;
+  for (const r of rs) {
+    const rem = r.route_credits != null ? r.route_credits : 0;
+    const tot = r.inventory_total || 0;
+    balance += rem; used += Math.max(0, tot - rem);
+    if (r.vendor_status === 'pending') pending++;
+  }
+  return { endpoints: rs.length, balance, used, pending };
+}
+
+app.get('/api/vendors', wrap(async (req, res) => {
+  const vs = await db.Vendor.find({}).sort({ createdAt: -1 }).lean();
+  const out = [];
+  for (const v of vs) {
+    out.push(Object.assign({
+      vendor_id: v.vendor_id, name: v.name, email: v.email, is_active: v.is_active,
+      notes: v.notes, last_login_at: v.last_login_at, createdAt: v.createdAt,
+    }, await vendorStats(v.vendor_id)));
+  }
+  res.json(out);
+}));
+
+// Create a vendor. Returns the plaintext password ONCE (never stored in clear).
+app.post('/api/vendors', wrap(async (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  let vendor_id = slugify(b.vendor_id || name);
+  if (!vendor_id) return res.status(400).json({ error: 'vendor id or name required' });
+  if (await db.Vendor.findOne({ vendor_id })) return res.status(400).json({ error: `vendor id "${vendor_id}" already exists` });
+  const pass = String(b.password || '').trim() || genPass();
+  await db.Vendor.create({
+    vendor_id, name, email: String(b.email || '').trim(),
+    password: await bcrypt.hash(pass, 10), notes: String(b.notes || '').trim(),
+  });
+  res.status(201).json({ ok: true, vendor_id, password: pass });
+}));
+
+app.patch('/api/vendors/:vid', wrap(async (req, res) => {
+  const b = req.body || {}; const set = {};
+  if (b.name != null) set.name = String(b.name).trim();
+  if (b.email != null) set.email = String(b.email).trim();
+  if (b.notes != null) set.notes = String(b.notes).trim();
+  if (b.is_active != null) set.is_active = !!b.is_active;
+  const v = await db.Vendor.findOneAndUpdate({ vendor_id: req.params.vid }, { $set: set }, { new: true });
+  if (!v) return res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
+}));
+
+// Reset a vendor's password → returns the new plaintext once.
+app.post('/api/vendors/:vid/password', wrap(async (req, res) => {
+  const pass = String((req.body || {}).password || '').trim() || genPass();
+  const v = await db.Vendor.findOneAndUpdate({ vendor_id: req.params.vid }, { $set: { password: await bcrypt.hash(pass, 10) } });
+  if (!v) return res.status(404).json({ error: 'not found' });
+  res.json({ ok: true, password: pass });
+}));
+
+app.delete('/api/vendors/:vid', wrap(async (req, res) => {
+  const inUse = await db.Route.countDocuments({ vendor_id: req.params.vid });
+  if (inUse) return res.status(400).json({ error: `vendor owns ${inUse} endpoint(s) — delete/reassign those routes first` });
+  await db.Vendor.deleteOne({ vendor_id: req.params.vid });
+  res.json({ ok: true });
+}));
+
+// A vendor's endpoints (full route view for the operator: name, type, url, status, balance, used).
+app.get('/api/vendors/:vid/endpoints', wrap(async (req, res) => {
+  const rs = await db.Route.find({ vendor_id: req.params.vid }).sort({ createdAt: -1 }).lean();
+  res.json(rs.map((r) => {
+    const rem = r.route_credits != null ? r.route_credits : 0;
+    const tot = r.inventory_total || 0;
+    return {
+      id: String(r._id), name: r.name, type: r.type, api_url: r.api_url,
+      cost_per_sms: r.cost_per_sms, vendor_status: r.vendor_status || 'pending',
+      is_active: r.is_active, balance: rem, used: Math.max(0, tot - rem),
+      assigned: undefined,
+    };
+  }));
+}));
+
+// All endpoints awaiting review (across vendors) — for the operator dashboard badge/queue.
+app.get('/api/vendor-routes/pending', wrap(async (req, res) => {
+  const rs = await db.Route.find({ vendor_id: { $ne: null }, vendor_status: 'pending' }).sort({ createdAt: -1 }).lean();
+  res.json(rs.map((r) => ({ id: String(r._id), name: r.name, type: r.type, api_url: r.api_url, vendor_id: r.vendor_id, balance: r.route_credits || 0, cost_per_sms: r.cost_per_sms })));
+}));
+
+// Approve a vendor endpoint → becomes active & assignable to clients like any other route.
+app.post('/api/vendor-routes/:id/approve', wrap(async (req, res) => {
+  const r = await db.Route.findOneAndUpdate(
+    { _id: req.params.id, vendor_id: { $ne: null } },
+    { $set: { vendor_status: 'approved', is_active: true } }, { new: true });
+  if (!r) return res.status(404).json({ error: 'not a vendor endpoint' });
+  res.json({ ok: true });
+}));
+
+// Reject (keep the route but disabled, not assignable).
+app.post('/api/vendor-routes/:id/reject', wrap(async (req, res) => {
+  const r = await db.Route.findOneAndUpdate(
+    { _id: req.params.id, vendor_id: { $ne: null } },
+    { $set: { vendor_status: 'rejected', is_active: false } }, { new: true });
+  if (!r) return res.status(404).json({ error: 'not a vendor endpoint' });
   res.json({ ok: true });
 }));
 
@@ -1681,7 +1794,7 @@ app.get('/api/domains/:host/dnscheck', wrap(async (req, res) => {
 // ---------------- auto-templating: global pool + content policy ----------------
 async function getPolicy() {
   const s = await db.Setting.findOne({ key: 'content_policy' });
-  return Object.assign({ force_auto_template: true, numeric_only: true, min_len: 4, max_len: 10 }, (s && s.value) || {});
+  return Object.assign({ force_auto_template: false, numeric_only: true, min_len: 4, max_len: 10 }, (s && s.value) || {});
 }
 app.get('/api/templates', wrap(async (req, res) => {
   const [pool, policy] = await Promise.all([
